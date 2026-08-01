@@ -21,14 +21,13 @@ frontend/.next/
 frontend/.vinext/
 frontend/dist/
 frontend/.wrangler/
-frontend/build/
 frontend/tsconfig.tsbuildinfo
 *.log
 
 # Runtime data
-data/
-storage/
-work/
+/data/
+/storage/
+/work/
 backend/pytest-cache-files-*/
 
 # Editor and OS
