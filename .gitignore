@@ -1,0 +1,38 @@
+# Local secrets
+backend/.env
+frontend/.env.local
+.env
+**/.env
+**/.env.local
+
+# Python
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node and builds
+frontend/node_modules/
+frontend/.next/
+frontend/.vinext/
+frontend/dist/
+frontend/.wrangler/
+frontend/build/
+frontend/tsconfig.tsbuildinfo
+*.log
+
+# Runtime data
+data/
+storage/
+work/
+backend/pytest-cache-files-*/
+
+# Editor and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

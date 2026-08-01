@@ -1,0 +1,1 @@
+"""Azure Document Intelligence adapter."""

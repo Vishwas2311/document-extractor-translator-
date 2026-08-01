@@ -1,0 +1,88 @@
+import os
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(os.environ.get("PROJECT_ROOT", Path(__file__).resolve().parents[3])).resolve()
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / "backend" / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_name: str = "CareTranslate Studio"
+    app_env: str = "development"
+    debug: bool = False
+    api_v1_prefix: str = "/api/v1"
+    frontend_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    database_url: str | None = None
+    storage_root: Path = Path("storage/documents")
+    max_upload_size_mb: int = Field(default=50, ge=1, le=500)
+    allowed_extensions: str = "pdf,png,jpg,jpeg,tif,tiff,bmp"
+
+    azure_auth_mode: str = "api_key"
+    azure_document_intelligence_endpoint: str | None = None
+    azure_document_intelligence_api_key: str | None = None
+    azure_document_intelligence_model_id: str = "prebuilt-layout"
+    azure_document_intelligence_features: str = "languages"
+
+    azure_openai_base_url: str | None = None
+    azure_openai_api_key: str | None = None
+    azure_openai_deployment: str | None = None
+    azure_openai_reasoning_effort: str = "minimal"
+    azure_openai_max_completion_tokens: int = 8000
+
+    target_language: str = "en"
+    translation_max_blocks: int = 25
+    translation_max_input_chars: int = 12000
+    ocr_review_threshold: float = Field(default=0.85, ge=0, le=1)
+    azure_max_retries: int = 3
+    azure_request_timeout_seconds: int = 180
+    processing_concurrency: int = 1
+    job_lease_seconds: int = 300
+
+    log_level: str = "INFO"
+    log_format: str = "json"
+
+    @model_validator(mode="after")
+    def resolve_local_paths(self) -> "Settings":
+        if not self.storage_root.is_absolute():
+            self.storage_root = (PROJECT_ROOT / self.storage_root).resolve()
+        if not self.database_url:
+            database_path = (PROJECT_ROOT / "data" / "application.db").resolve()
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            self.database_url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+        return self
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [item.strip() for item in self.frontend_origins.split(",") if item.strip()]
+
+    @property
+    def extension_set(self) -> set[str]:
+        return {item.strip().lower().lstrip(".") for item in self.allowed_extensions.split(",")}
+
+    @property
+    def document_intelligence_configured(self) -> bool:
+        return bool(
+            self.azure_document_intelligence_endpoint and self.azure_document_intelligence_api_key
+        )
+
+    @property
+    def azure_openai_configured(self) -> bool:
+        return bool(
+            self.azure_openai_base_url
+            and self.azure_openai_api_key
+            and self.azure_openai_deployment
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

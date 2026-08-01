@@ -1,0 +1,16 @@
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic>=2.10
+pydantic-settings>=2.7
+SQLAlchemy>=2.0
+aiosqlite>=0.20
+alembic>=1.14
+azure-ai-documentintelligence==1.0.2
+azure-identity>=1.19
+aiohttp>=3.11
+openai>=1.68
+httpx>=0.28
+tenacity>=9.0
+structlog>=25.1
+aiofiles>=24.1
+python-multipart>=0.0.20
