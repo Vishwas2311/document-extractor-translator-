@@ -261,6 +261,16 @@ function firstSpanOffset(spans: Array<{ offset: number }> | undefined) {
   return Math.min(...spans.map((span) => span.offset));
 }
 
+function findSelectedCell(page: PageResult | undefined, selectedId: string | null) {
+  if (!page || !selectedId) return null;
+  for (let tableIndex = 0; tableIndex < page.tables.length; tableIndex += 1) {
+    const table = page.tables[tableIndex];
+    const cell = table.cells.find((candidate) => candidate.cell_id === selectedId);
+    if (cell) return { cell, table, tableIndex };
+  }
+  return null;
+}
+
 function topForRegions(regions: BoundingRegion[], pageNumber: number) {
   const pageRegions = regions.filter((region) => region.page_number === pageNumber);
   if (!pageRegions.length) return undefined;
@@ -986,15 +996,7 @@ export function DocumentStudio() {
     () => standaloneBlocks.find((block) => block.block_id === selectedId) ?? null,
     [standaloneBlocks, selectedId],
   );
-  const selectedCell = useMemo(() => {
-    if (!page || !selectedId) return null;
-    for (let tableIndex = 0; tableIndex < page.tables.length; tableIndex += 1) {
-      const table = page.tables[tableIndex];
-      const cell = table.cells.find((candidate) => candidate.cell_id === selectedId);
-      if (cell) return { cell, table, tableIndex };
-    }
-    return null;
-  }, [page, selectedId]);
+  const selectedCell = useMemo(() => findSelectedCell(page, selectedId), [page, selectedId]);
 
   // Unified shape for the thumbnail rail. Demo pages are fully preloaded (only 3
   // pages); real documents use the lightweight per-page summary so the rail renders

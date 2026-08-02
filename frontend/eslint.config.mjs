@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated Emscripten/WASM decoder glue - not hand-written source.
+    "public/wasm/**",
   ]),
 ]);
 
