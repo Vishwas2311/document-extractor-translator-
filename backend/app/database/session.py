@@ -36,6 +36,24 @@ class Database:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
+    async def ensure_prd_columns(self) -> None:
+        """Add PRD-readiness columns on existing SQLite databases (create_all won't alter)."""
+        statements = [
+            "ALTER TABLE documents ADD COLUMN data_class VARCHAR(32) DEFAULT 'synthetic'",
+            "ALTER TABLE documents ADD COLUMN processing_profile VARCHAR(64) DEFAULT 'GENAI_PSEUDONYMIZED'",
+        ]
+        async with self.engine.begin() as connection:
+
+            def _migrate(sync_conn: Any) -> None:
+                for statement in statements:
+                    try:
+                        sync_conn.exec_driver_sql(statement)
+                    except Exception:
+                        # Column already exists — ignore.
+                        pass
+
+            await connection.run_sync(_migrate)
+
     async def session(self) -> AsyncIterator[AsyncSession]:
         async with self.session_factory() as session:
             yield session

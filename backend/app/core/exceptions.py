@@ -66,3 +66,26 @@ class TranslationValidationError(AppError):
     code = "translation_output_invalid"
     status_code = 502
     retryable = True
+
+
+class AuthenticationError(AppError):
+    code = "authentication_required"
+    status_code = 401
+
+
+class AuthorizationError(AppError):
+    code = "authorization_denied"
+    status_code = 403
+
+
+class PolicyBlockedError(AppError):
+    """Fail-closed security gateway denial before any external content transmission."""
+
+    code = "processing_profile_blocked"
+    status_code = 422
+
+
+class RateLimitError(AppError):
+    code = "rate_limit_exceeded"
+    status_code = 429
+    retryable = True

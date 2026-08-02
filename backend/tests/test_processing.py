@@ -1,12 +1,45 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.core.enums import TranslationStatus
+from app.core.config import Settings
+from app.core.enums import ProcessingProfile, TranslationStatus
 from app.schemas.page import CanonicalDocument, PageMetadata, TableCell, TableResult
 from app.schemas.translation import TranslationBatchResponse, TranslationItem
 from app.services.language import LanguageService
 from app.services.processing import ProcessingService
+from app.services.security_gateway import SecurityGateway
 from app.services.validation import TranslationValidator
+
+
+def _test_gateway() -> SecurityGateway:
+    return SecurityGateway(
+        Settings(
+            auth_required=False,
+            api_auth_tokens="",
+            default_processing_profile="GENAI_SYNTHETIC_POC",
+            allow_synthetic_raw_llm=True,
+            pseudonymization_secret="test",
+        )
+    )
+
+
+def _service(**kwargs: object) -> ProcessingService:
+    defaults: dict[str, object] = {
+        "repository": None,
+        "analyzer": None,
+        "mapper": None,
+        "exporter": None,
+        "language_service": LanguageService(),
+        "validator": TranslationValidator(),
+        "gateway": _test_gateway(),
+        "max_batch_blocks": 25,
+        "max_batch_chars": 12000,
+        "ocr_review_threshold": 0.85,
+        "worker_id": "test-worker",
+        "job_lease_seconds": 300,
+    }
+    defaults.update(kwargs)
+    return ProcessingService(**defaults)  # type: ignore[arg-type]
 
 
 class MemoryStorage:
@@ -41,21 +74,7 @@ class FakeTranslator:
 
 async def test_translates_table_cells_with_stable_ids() -> None:
     storage = MemoryStorage()
-    service = ProcessingService(
-        repository=None,
-        storage=storage,
-        analyzer=None,
-        mapper=None,
-        translator=FakeTranslator(),
-        language_service=LanguageService(),
-        validator=TranslationValidator(),
-        exporter=None,
-        max_batch_blocks=25,
-        max_batch_chars=12000,
-        ocr_review_threshold=0.85,
-        worker_id="test-worker",
-        job_lease_seconds=300,
-    )
+    service = _service(storage=storage, translator=FakeTranslator())
     document = CanonicalDocument(
         document_id="doc-1",
         filename="table.pdf",
@@ -86,7 +105,9 @@ async def test_translates_table_cells_with_stable_ids() -> None:
         ],
     )
 
-    review_required = await service._translate(document)
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
     cell = document.tables[0].cells[0]
 
     assert not review_required
@@ -99,21 +120,7 @@ async def test_translates_table_cells_with_stable_ids() -> None:
 
 async def test_numeric_only_blocks_do_not_force_review() -> None:
     storage = MemoryStorage()
-    service = ProcessingService(
-        repository=None,
-        storage=storage,
-        analyzer=None,
-        mapper=None,
-        translator=FakeTranslator(),
-        language_service=LanguageService(),
-        validator=TranslationValidator(),
-        exporter=None,
-        max_batch_blocks=25,
-        max_batch_chars=12000,
-        ocr_review_threshold=0.85,
-        worker_id="test-worker",
-        job_lease_seconds=300,
-    )
+    service = _service(storage=storage, translator=FakeTranslator())
     from app.schemas.page import TextBlock
 
     document = CanonicalDocument(
@@ -129,7 +136,9 @@ async def test_numeric_only_blocks_do_not_force_review() -> None:
         ],
     )
 
-    review_required = await service._translate(document)
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
 
     assert not review_required
     for block in document.blocks:
@@ -158,20 +167,10 @@ class PartiallyFailingTranslator:
 
 async def test_batch_translation_failure_is_isolated_per_block() -> None:
     storage = MemoryStorage()
-    service = ProcessingService(
-        repository=None,
+    service = _service(
         storage=storage,
-        analyzer=None,
-        mapper=None,
         translator=PartiallyFailingTranslator(),
-        language_service=LanguageService(),
-        validator=TranslationValidator(),
-        exporter=None,
         max_batch_blocks=1,
-        max_batch_chars=12000,
-        ocr_review_threshold=0.85,
-        worker_id="test-worker",
-        job_lease_seconds=300,
     )
     from app.schemas.page import TextBlock
 
@@ -186,7 +185,9 @@ async def test_batch_translation_failure_is_isolated_per_block() -> None:
         ],
     )
 
-    review_required = await service._translate(document)
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
 
     assert review_required
     first, second = document.blocks
@@ -209,6 +210,8 @@ class MemoryRepository:
             id=document_id,
             original_filename="intake.pdf",
             stored_extension=".pdf",
+            data_class="synthetic",
+            processing_profile="GENAI_SYNTHETIC_POC",
         )
 
     async def latest_job(self, document_id: str):
@@ -233,6 +236,7 @@ class MemoryRepository:
         *,
         document_values: dict[str, object],
         job_values: dict[str, object],
+        lease_owner: str | None = None,
     ) -> None:
         self.document_updates.append(document_values)
         self.job_updates.append(job_values)
@@ -295,20 +299,13 @@ async def test_preserves_extraction_when_translation_is_not_configured() -> None
 
     repository = MemoryRepository()
     storage = MemoryStorage()
-    service = ProcessingService(
+    service = _service(
         repository=repository,
         storage=storage,
         analyzer=FakeAnalyzer(),
         mapper=FakeMapper(),
         translator=MissingOpenAITranslator(),
-        language_service=LanguageService(),
-        validator=TranslationValidator(),
         exporter=ExportService(),
-        max_batch_blocks=25,
-        max_batch_chars=12000,
-        ocr_review_threshold=0.85,
-        worker_id="test-worker",
-        job_lease_seconds=300,
     )
 
     await service.process("doc-1")

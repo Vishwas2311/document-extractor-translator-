@@ -14,7 +14,9 @@ export default function StudioError({
   reset: () => void;
 }) {
   useEffect(() => {
-    console.error("CareTranslate Studio crashed:", error);
+    // Avoid logging full error bodies — they can include document content from a
+    // failed render. Digest is enough for correlating with server logs.
+    console.error("CareTranslate Studio crashed:", error.digest ?? "no-digest");
   }, [error]);
 
   return (

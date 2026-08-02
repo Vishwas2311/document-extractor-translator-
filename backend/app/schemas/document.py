@@ -10,12 +10,6 @@ class ProcessingInfo(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-class DocumentCreateResponse(BaseModel):
-    document_id: str
-    status: str
-    status_url: str
-
-
 class DocumentSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -29,6 +23,8 @@ class DocumentSummary(BaseModel):
     page_count: int | None = None
     source_languages: list[str] = Field(default_factory=list)
     target_language: str
+    data_class: str = "synthetic"
+    processing_profile: str = "GENAI_PSEUDONYMIZED"
     error_code: str | None = None
     safe_error_message: str | None = None
     created_at: datetime
@@ -39,6 +35,14 @@ class DocumentSummary(BaseModel):
 class DocumentDetail(DocumentSummary):
     schema_version: str
     processing_version: str
+
+
+class DocumentCreateResponse(BaseModel):
+    document_id: str
+    status: str
+    status_url: str
+    processing_profile: str | None = None
+    data_class: str | None = None
 
 
 class DocumentListResponse(BaseModel):

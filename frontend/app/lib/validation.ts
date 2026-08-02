@@ -3,10 +3,12 @@ import type {
   DocumentCreateResponse,
   DocumentDetail,
   DocumentListResponse,
+  DocumentStatus,
   DocumentSummary,
   HealthStatus,
   PageResult,
   PageSummary,
+  SessionStatus,
   TableCell,
   TableResult,
   TextBlock,
@@ -18,6 +20,19 @@ import type {
 // response reach deep into rendering before it throws, as a cryptic TypeError with no
 // context. These guards fail once, at the trust boundary, with a message that says
 // what request produced the bad data.
+
+const DOCUMENT_STATUSES = new Set<DocumentStatus>([
+  "queued",
+  "uploaded",
+  "extracting",
+  "normalizing",
+  "translating",
+  "validating",
+  "exporting",
+  "completed",
+  "needs_review",
+  "failed",
+]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -33,6 +48,10 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(isString);
+}
+
+function isDocumentStatus(value: unknown): value is DocumentStatus {
+  return isString(value) && DOCUMENT_STATUSES.has(value as DocumentStatus);
 }
 
 function isPoint(value: unknown): boolean {
@@ -103,6 +122,8 @@ export function isPageResult(value: unknown): value is PageResult {
     isFiniteNumber(page.width) &&
     isFiniteNumber(page.height) &&
     isString(page.unit) &&
+    isFiniteNumber(page.angle) &&
+    isString(page.source_text) &&
     Array.isArray(value.blocks) &&
     value.blocks.every(isTextBlock) &&
     Array.isArray(value.tables) &&
@@ -117,7 +138,7 @@ export function isDocumentDetail(value: unknown): value is DocumentDetail {
     isString(value.id) &&
     isString(value.original_filename) &&
     isString(value.content_type) &&
-    isString(value.status) &&
+    isDocumentStatus(value.status) &&
     isString(value.current_stage) &&
     isFiniteNumber(value.progress_percent) &&
     isString(value.created_at) &&
@@ -129,7 +150,7 @@ export function isDocumentCreateResponse(value: unknown): value is DocumentCreat
   return (
     isObject(value) &&
     isString(value.document_id) &&
-    isString(value.status) &&
+    isDocumentStatus(value.status) &&
     isString(value.status_url)
   );
 }
@@ -163,7 +184,7 @@ export function isDocumentSummary(value: unknown): value is DocumentSummary {
     isString(value.original_filename) &&
     isString(value.content_type) &&
     isFiniteNumber(value.file_size) &&
-    isString(value.status) &&
+    isDocumentStatus(value.status) &&
     isString(value.current_stage) &&
     isFiniteNumber(value.progress_percent) &&
     isStringArray(value.source_languages) &&
@@ -185,11 +206,40 @@ export function isDocumentListResponse(value: unknown): value is DocumentListRes
 }
 
 export function isHealthStatus(value: unknown): value is HealthStatus {
+  if (
+    !isObject(value) ||
+    !isString(value.status) ||
+    !isObject(value.azure_configured) ||
+    !isBoolean(value.azure_configured.document_intelligence) ||
+    !isBoolean(value.azure_configured.openai)
+  ) {
+    return false;
+  }
+  // New readiness fields are optional so older backends still validate.
+  if (value.auth_required !== undefined && !isBoolean(value.auth_required)) return false;
+  if (
+    value.default_processing_profile !== undefined &&
+    !isString(value.default_processing_profile)
+  ) {
+    return false;
+  }
+  if (value.default_data_class !== undefined && !isString(value.default_data_class)) return false;
+  if (
+    value.openai_deployment_configured !== undefined &&
+    !isBoolean(value.openai_deployment_configured)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isSessionStatus(value: unknown): value is SessionStatus {
   return (
     isObject(value) &&
-    isString(value.status) &&
-    isObject(value.azure_configured) &&
-    isBoolean(value.azure_configured.document_intelligence) &&
-    isBoolean(value.azure_configured.openai)
+    isBoolean(value.authenticated) &&
+    isBoolean(value.auth_required) &&
+    (value.subject === null || isString(value.subject)) &&
+    isString(value.security_label) &&
+    isString(value.data_policy)
   );
 }

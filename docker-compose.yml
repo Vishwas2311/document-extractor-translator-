@@ -8,7 +8,8 @@ services:
     environment:
       PROJECT_ROOT: /app
     ports:
-      - "8000:8000"
+      # Loopback-only: do not expose the unauthenticated-looking API on all interfaces.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./data:/app/data
       - ./storage:/app/storage

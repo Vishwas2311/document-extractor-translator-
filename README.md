@@ -210,14 +210,17 @@ AZURE_OPENAI_REASONING_EFFORT=minimal
 
 Important: AZURE_OPENAI_DEPLOYMENT is the deployment name created in Azure, not necessarily the catalog model name.
 
-The frontend only needs this browser-safe value in frontend/.env.local:
+The frontend needs these browser-safe values in frontend/.env.local:
 
 
 ```text
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
+NEXT_PUBLIC_API_AUTH_TOKEN=local-dev-token-change-me
 ```
 
-Never place either Azure key in frontend/.env.local or any NEXT_PUBLIC variable.
+Match `NEXT_PUBLIC_API_AUTH_TOKEN` to a token listed in backend `API_AUTH_TOKENS`.
+This local bearer token is for localhost PRD-ready auth only — never put Azure
+keys in any `NEXT_PUBLIC_*` variable. Production replaces this with Entra/JWT.
 
 ## Run services separately
 

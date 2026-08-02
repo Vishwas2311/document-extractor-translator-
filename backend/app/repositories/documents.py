@@ -8,10 +8,17 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.enums import TERMINAL_DOCUMENT_STATUSES, DocumentStatus, JobStatus
-from app.core.exceptions import ConflictError, DocumentNotFoundError, JobNotFoundError
+from app.core.enums import TERMINAL_DOCUMENT_STATUSES, DocumentStatus, JobStatus, RetryMode
+from app.core.exceptions import (
+    ConflictError,
+    DocumentNotFoundError,
+    JobLeaseLostError,
+    JobNotFoundError,
+)
 from app.models.document import Document
 from app.models.processing_job import ProcessingJob
+
+CLAIMABLE_JOB_STATUSES = {JobStatus.QUEUED.value, JobStatus.RUNNING.value}
 
 
 class DocumentRepository:
@@ -82,12 +89,7 @@ class DocumentRepository:
             await session.commit()
 
     async def claim_job(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
-        """Atomically claim a job for this worker if it is unclaimed or its lease expired.
-
-        Uses a single conditional UPDATE (compare-and-swap) rather than a read-then-write,
-        so two workers racing to claim the same job can never both succeed - the loser's
-        UPDATE simply matches zero rows.
-        """
+        """Atomically claim a non-terminal job if unclaimed or lease expired."""
         now = datetime.now(UTC)
         async with self.session_factory() as session:
             result = cast(
@@ -96,6 +98,7 @@ class DocumentRepository:
                     update(ProcessingJob)
                     .where(
                         ProcessingJob.id == job_id,
+                        ProcessingJob.status.in_(list(CLAIMABLE_JOB_STATUSES)),
                         or_(
                             ProcessingJob.lease_owner.is_(None),
                             ProcessingJob.lease_expires_at.is_(None),
@@ -132,6 +135,31 @@ class DocumentRepository:
             await session.commit()
             return result.rowcount > 0
 
+    async def clear_stale_leases(self) -> int:
+        """Release leases for non-terminal jobs so recovery can reclaim them."""
+        now = datetime.now(UTC)
+        terminal = [status.value for status in TERMINAL_DOCUMENT_STATUSES]
+        async with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(ProcessingJob)
+                    .where(
+                        ProcessingJob.status.in_(list(CLAIMABLE_JOB_STATUSES)),
+                        ProcessingJob.document_id.in_(
+                            select(Document.id).where(Document.status.not_in(terminal))
+                        ),
+                        or_(
+                            ProcessingJob.lease_expires_at.is_(None),
+                            ProcessingJob.lease_expires_at < now,
+                        ),
+                    )
+                    .values(lease_owner=None, lease_expires_at=None)
+                ),
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def finish_processing(
         self,
         document_id: str,
@@ -139,12 +167,9 @@ class DocumentRepository:
         *,
         document_values: dict[str, object],
         job_values: dict[str, object],
+        lease_owner: str | None = None,
     ) -> None:
-        """Write the terminal document status and job status in a single transaction.
-
-        Both updates commit together so a crash between them can never leave the job
-        stuck at RUNNING while its document already shows a terminal status.
-        """
+        """Write terminal document+job status. When lease_owner is set, require ownership."""
         document_values = {**document_values, "updated_at": datetime.now(UTC)}
         async with self.session_factory() as session:
             doc_result = cast(
@@ -155,25 +180,32 @@ class DocumentRepository:
             )
             if doc_result.rowcount == 0:
                 raise DocumentNotFoundError("Document was not found.")
+
+            job_where = [ProcessingJob.id == job_id]
+            if lease_owner is not None:
+                job_where.append(ProcessingJob.lease_owner == lease_owner)
+
             job_result = cast(
                 CursorResult[Any],
                 await session.execute(
-                    update(ProcessingJob).where(ProcessingJob.id == job_id).values(**job_values)
+                    update(ProcessingJob).where(*job_where).values(**job_values)
                 ),
             )
             if job_result.rowcount == 0:
+                if lease_owner is not None:
+                    raise JobLeaseLostError(
+                        "This worker's job lease expired and was reclaimed by another worker."
+                    )
                 raise JobNotFoundError("Processing job was not found.")
             await session.commit()
 
-    async def create_retry_job(self, document_id: str) -> ProcessingJob:
-        """Transition a document back to queued and enqueue a retry job, atomically.
-
-        The eligibility check (status is failed/needs_review) and the transition are the
-        same guarded UPDATE, so two concurrent retry requests can't both pass the check:
-        only the first commits a row change, the second sees rowcount == 0 and is told
-        the document is no longer in a retryable state instead of silently creating a
-        second, orphaned job.
-        """
+    async def create_retry_job(
+        self,
+        document_id: str,
+        *,
+        mode: RetryMode = RetryMode.RESUME,
+    ) -> ProcessingJob:
+        """Transition a document back to queued and enqueue a retry job, atomically."""
         async with self.session_factory() as session:
             result = cast(
                 CursorResult[Any],
@@ -211,6 +243,7 @@ class DocumentRepository:
                 document_id=document_id,
                 attempt_number=(latest.attempt_number + 1) if latest else 1,
                 status=JobStatus.QUEUED.value,
+                stage=f"retry:{mode.value}",
             )
             session.add(job)
             await session.commit()

@@ -5,6 +5,8 @@ import type {
   HealthStatus,
   PageResult,
   PageSummary,
+  RetryMode,
+  SessionStatus,
 } from "../types";
 import {
   isDocumentCreateResponse,
@@ -13,9 +15,13 @@ import {
   isHealthStatus,
   isPageResult,
   isPageSummaryArray,
+  isSessionStatus,
 } from "./validation";
 
 export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
+
+/** Local-only bearer token. Never place production secrets in NEXT_PUBLIC_*. */
+const API_AUTH_TOKEN = (process.env.NEXT_PUBLIC_API_AUTH_TOKEN ?? "").trim();
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -43,6 +49,50 @@ function endpoint(path: string): string {
   return API_BASE + path;
 }
 
+function authHeaders(init?: HeadersInit): Headers {
+  const headers = new Headers(init);
+  if (API_AUTH_TOKEN && !headers.has("Authorization")) {
+    headers.set("Authorization", "Bearer " + API_AUTH_TOKEN);
+  }
+  return headers;
+}
+
+/**
+ * FastAPI may return `detail` as a string, a validation-error array, or a structured
+ * object. Flatten those shapes into a single user-facing message.
+ */
+export function parseErrorDetail(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== "object") return fallback;
+  const record = payload as Record<string, unknown>;
+  const detail = record.detail ?? record.message;
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object") {
+          const entry = item as Record<string, unknown>;
+          if (typeof entry.msg === "string") return entry.msg;
+          if (typeof entry.message === "string") return entry.message;
+        }
+        return null;
+      })
+      .filter((part): part is string => Boolean(part));
+    if (parts.length) return parts.join("; ");
+  }
+  if (detail && typeof detail === "object") {
+    const entry = detail as Record<string, unknown>;
+    if (typeof entry.message === "string" && entry.message.trim()) return entry.message;
+    if (typeof entry.msg === "string" && entry.msg.trim()) return entry.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
 /**
  * Fetches `path`, enforcing a request timeout and translating a non-2xx response into
  * a readable Error. Without a timeout, a single stalled request (a dropped connection,
@@ -67,12 +117,13 @@ async function performRequest(
   }
 
   try {
-    const response = await fetch(endpoint(path), { ...init, signal: controller.signal });
+    const headers = authHeaders(init?.headers);
+    const response = await fetch(endpoint(path), { ...init, headers, signal: controller.signal });
     if (!response.ok) {
       let message = "Request failed with status " + response.status + ".";
       try {
-        const payload = (await response.json()) as { detail?: string; message?: string };
-        message = payload.detail ?? payload.message ?? message;
+        const payload: unknown = await response.json();
+        message = parseErrorDetail(payload, message);
       } catch {
         // Keep the HTTP fallback when the service did not return JSON.
       }
@@ -124,6 +175,10 @@ async function apiFetchVoid(
   await performRequest(path, init, options);
 }
 
+function documentPath(documentId: string, suffix = ""): string {
+  return "/documents/" + encodeURIComponent(documentId) + suffix;
+}
+
 export function uploadDocument(
   file: File,
   options?: RequestOptions,
@@ -144,7 +199,7 @@ export function getDocument(
   options?: RequestOptions,
 ): Promise<DocumentDetail> {
   return apiFetch(
-    "/documents/" + documentId,
+    documentPath(documentId),
     isDocumentDetail,
     "document status",
     undefined,
@@ -158,7 +213,7 @@ export function getPage(
   options?: RequestOptions,
 ): Promise<PageResult> {
   return apiFetch(
-    "/documents/" + documentId + "/pages/" + pageNumber,
+    documentPath(documentId, "/pages/" + pageNumber),
     isPageResult,
     "page result",
     undefined,
@@ -179,7 +234,7 @@ export function listPageSummaries(
   options?: RequestOptions,
 ): Promise<PageSummary[]> {
   return apiFetch(
-    "/documents/" + documentId + "/pages",
+    documentPath(documentId, "/pages"),
     isPageSummaryArray,
     "page list",
     undefined,
@@ -202,32 +257,88 @@ export function listDocuments(
 }
 
 export function deleteDocument(documentId: string, options?: RequestOptions): Promise<void> {
-  return apiFetchVoid("/documents/" + documentId, { method: "DELETE" }, options);
+  return apiFetchVoid(documentPath(documentId), { method: "DELETE" }, options);
 }
 
 export function checkHealth(options?: RequestOptions): Promise<HealthStatus> {
   return apiFetch("/health/ready", isHealthStatus, "health status", undefined, options);
 }
 
-export function sourceUrl(documentId: string): string {
-  return API_BASE + "/documents/" + documentId + "/source";
+export function checkSession(options?: RequestOptions): Promise<SessionStatus> {
+  return apiFetch("/health/session", isSessionStatus, "session status", undefined, options);
 }
 
+/**
+ * Path helper only — do not use as an `<img>`/`<iframe>`/`pdf.js` URL when auth is
+ * required. Prefer `fetchSourceBlobUrl`, which sends the Authorization header.
+ */
+export function sourceUrl(documentId: string): string {
+  return API_BASE + documentPath(documentId, "/source");
+}
+
+/**
+ * Path helper only — do not open this URL in a new tab when auth is required.
+ * Prefer `downloadArtifact`, which fetches with Authorization and saves a blob.
+ */
 export function downloadUrl(
   documentId: string,
   artifact: "page" | "extracted" | "bilingual",
   pageNumber?: number,
 ): string {
   const query = artifact === "page" && pageNumber ? "?page=" + pageNumber : "";
-  return API_BASE + "/documents/" + documentId + "/downloads/" + artifact + query;
+  return API_BASE + documentPath(documentId, "/downloads/" + artifact) + query;
+}
+
+/**
+ * Fetches the source file with auth and returns an object URL suitable for pdf.js
+ * or `<img src>`. Caller must revoke the URL when done.
+ */
+export async function fetchSourceBlobUrl(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<string> {
+  const response = await performRequest(documentPath(documentId, "/source"), undefined, options);
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
+
+export async function downloadArtifact(
+  documentId: string,
+  artifact: "page" | "extracted" | "bilingual",
+  pageNumber?: number,
+  options?: RequestOptions,
+): Promise<void> {
+  const query = artifact === "page" && pageNumber ? "?page=" + pageNumber : "";
+  const response = await performRequest(
+    documentPath(documentId, "/downloads/" + artifact) + query,
+    undefined,
+    options,
+  );
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const matched = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(disposition);
+  const filename = matched
+    ? decodeURIComponent(matched[1].replace(/"/g, ""))
+    : artifact + (artifact === "page" && pageNumber ? "-" + pageNumber : "") + ".json";
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = window.document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function retryDocument(
   documentId: string,
+  mode?: RetryMode,
   options?: RequestOptions,
 ): Promise<DocumentCreateResponse> {
+  const query = mode ? "?mode=" + encodeURIComponent(mode) : "";
   return apiFetch(
-    "/documents/" + documentId + "/retry",
+    documentPath(documentId, "/retry") + query,
     isDocumentCreateResponse,
     "document retry",
     { method: "POST" },
@@ -237,4 +348,8 @@ export function retryDocument(
 
 export function isTerminal(status: DocumentDetail["status"]): boolean {
   return status === "completed" || status === "needs_review" || status === "failed";
+}
+
+export function hasApiAuthToken(): boolean {
+  return Boolean(API_AUTH_TOKEN);
 }

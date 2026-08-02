@@ -3,11 +3,12 @@ import json
 from pathlib import Path
 from typing import Annotated, cast
 
-from fastapi import APIRouter, File, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.core.enums import DocumentStatus
-from app.core.exceptions import ConflictError, DocumentNotFoundError
+from app.core.auth import AuthPrincipal, require_principal
+from app.core.enums import DocumentStatus, RetryMode
+from app.core.exceptions import ConflictError, DocumentNotFoundError, InvalidDocumentError
 from app.dependencies.services import ServiceContainer
 from app.schemas.document import (
     DocumentCreateResponse,
@@ -18,7 +19,9 @@ from app.schemas.document import (
 )
 from app.schemas.page import PageResult
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_principal)])
+
+NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate, private", "Pragma": "no-cache"}
 
 
 def container(request: Request) -> ServiceContainer:
@@ -29,14 +32,23 @@ def container(request: Request) -> ServiceContainer:
 async def upload_document(
     request: Request,
     file: Annotated[UploadFile, File()],
+    data_class: Annotated[str | None, Form()] = None,
+    processing_profile: Annotated[str | None, Form()] = None,
+    _: AuthPrincipal = Depends(require_principal),
 ) -> DocumentCreateResponse:
     services = container(request)
-    document = await services.document_service.create_upload(file)
+    document = await services.document_service.create_upload(
+        file,
+        data_class=data_class,
+        processing_profile=processing_profile,
+    )
     await services.runner.enqueue(document.id)
     return DocumentCreateResponse(
         document_id=document.id,
         status=document.status,
         status_url=f"{services.settings.api_v1_prefix}/documents/{document.id}",
+        processing_profile=document.processing_profile,
+        data_class=document.data_class,
     )
 
 
@@ -56,9 +68,10 @@ async def list_documents(
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
-async def get_document(request: Request, document_id: str) -> DocumentDetail:
+async def get_document(request: Request, document_id: str) -> Response:
     document = await container(request).repository.get(document_id)
-    return DocumentDetail.model_validate(document)
+    payload = DocumentDetail.model_validate(document).model_dump(mode="json")
+    return JSONResponse(payload, headers=NO_STORE)
 
 
 @router.get("/{document_id}/source")
@@ -71,15 +84,16 @@ async def get_source(request: Request, document_id: str) -> FileResponse:
         media_type=document.content_type,
         filename=document.original_filename,
         content_disposition_type="inline",
+        headers=NO_STORE,
     )
 
 
 @router.get("/{document_id}/pages", response_model=list[PageSummary])
-async def list_pages(request: Request, document_id: str) -> list[PageSummary]:
+async def list_pages(request: Request, document_id: str) -> Response:
     services = container(request)
     document = await services.repository.get(document_id)
     if document.page_count is None:
-        return []
+        return JSONResponse([], headers=NO_STORE)
     summaries: list[PageSummary] = []
     for number in range(1, document.page_count + 1):
         payload = PageResult.model_validate(
@@ -97,7 +111,10 @@ async def list_pages(request: Request, document_id: str) -> list[PageSummary]:
                 review_required=bool(payload.warnings),
             )
         )
-    return summaries
+    return JSONResponse(
+        [item.model_dump(mode="json") for item in summaries],
+        headers=NO_STORE,
+    )
 
 
 @router.get("/{document_id}/pages/{page_number}")
@@ -114,8 +131,8 @@ async def get_page(
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     etag = f'"{hashlib.sha256(encoded).hexdigest()}"'
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-    return JSONResponse(payload, headers={"ETag": etag, "Cache-Control": "no-cache"})
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=NO_STORE)
+    return JSONResponse(payload, headers={**NO_STORE, "ETag": etag})
 
 
 @router.get("/{document_id}/downloads/{artifact}")
@@ -143,22 +160,40 @@ async def download_artifact(
     target = services.storage.artifact_path(document_id, relative)
     if not target.exists():
         raise DocumentNotFoundError("Download artifact was not found.")
-    return FileResponse(target, media_type="application/json", filename=filename)
+    return FileResponse(
+        target,
+        media_type="application/json",
+        filename=filename,
+        headers=NO_STORE,
+    )
 
 
 @router.post("/{document_id}/retry", response_model=DocumentCreateResponse, status_code=202)
-async def retry_document(request: Request, document_id: str) -> DocumentCreateResponse:
+async def retry_document(
+    request: Request,
+    document_id: str,
+    mode: str = Query(default="resume"),
+) -> DocumentCreateResponse:
     services = container(request)
-    await services.document_service.retry(document_id)
+    try:
+        retry_mode = RetryMode(mode)
+    except ValueError as exc:
+        raise InvalidDocumentError(
+            "Retry mode must be resume, retranslate, or reprocess."
+        ) from exc
+    document = await services.repository.get(document_id)
+    await services.document_service.retry(document_id, mode=retry_mode)
     await services.runner.enqueue(document_id)
     return DocumentCreateResponse(
         document_id=document_id,
         status=DocumentStatus.QUEUED.value,
         status_url=f"{services.settings.api_v1_prefix}/documents/{document_id}",
+        processing_profile=document.processing_profile,
+        data_class=document.data_class,
     )
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(request: Request, document_id: str) -> Response:
     await container(request).document_service.delete(document_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return Response(status_code=status.HTTP_204_NO_CONTENT, headers=NO_STORE)

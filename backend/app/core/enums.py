@@ -45,3 +45,26 @@ TERMINAL_DOCUMENT_STATUSES = {
     DocumentStatus.NEEDS_REVIEW,
     DocumentStatus.FAILED,
 }
+
+
+class ProcessingProfile(StrEnum):
+    """Backend-enforced AI processing profile (client cannot downgrade)."""
+
+    GENAI_PSEUDONYMIZED = "GENAI_PSEUDONYMIZED"
+    GENAI_SYNTHETIC_POC = "GENAI_SYNTHETIC_POC"
+    GENAI_RAW_EXCEPTION = "GENAI_RAW_EXCEPTION"
+    MANAGED_NO_LLM = "MANAGED_NO_LLM"
+    BLOCKED = "BLOCKED"
+
+
+class DataClass(StrEnum):
+    SYNTHETIC = "synthetic"
+    DEIDENTIFIED = "deidentified"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+
+class RetryMode(StrEnum):
+    RESUME = "resume"
+    RETRANSLATE = "retranslate"
+    REPROCESS = "reprocess"

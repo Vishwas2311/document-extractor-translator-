@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 
 type PdfPageProps = {
   src: string;
+  /** Optional blob URL already fetched with Authorization; preferred over `src` when set. */
+  authSrc?: string | null;
   pageNumber: number;
   zoom: number;
   rotation: number;
@@ -19,12 +21,64 @@ type PreviewState =
 
 let pdfJsPromise: Promise<PdfJsModule> | null = null;
 
+type CachedPdfEntry = {
+  // pdfjs document proxy; package typings for webpack.mjs are incomplete in this setup.
+  promise: Promise<{ destroy?: () => Promise<void>; getPage: (n: number) => Promise<{
+    getViewport: (params: { scale: number; rotation: number }) => { width: number; height: number };
+    render: (params: {
+      canvas: HTMLCanvasElement;
+      canvasContext: CanvasRenderingContext2D;
+      viewport: { width: number; height: number };
+      transform?: number[];
+    }) => { promise: Promise<void>; cancel: () => void };
+  }> }>;
+  refCount: number;
+};
+
+/** Shared across thumbnail + viewer instances so the same source is not downloaded N times. */
+const pdfDocumentCache = new Map<string, CachedPdfEntry>();
+
 function loadPdfJs() {
   pdfJsPromise ??= import("pdfjs-dist/webpack.mjs");
   return pdfJsPromise.catch((error) => {
     pdfJsPromise = null;
     throw error;
   });
+}
+
+function acquirePdfDocument(pdfjs: PdfJsModule, src: string): CachedPdfEntry["promise"] {
+  let entry = pdfDocumentCache.get(src);
+  if (!entry) {
+    const task = pdfjs.getDocument({
+      url: src,
+      cMapUrl: "/cmaps/",
+      cMapPacked: true,
+      standardFontDataUrl: "/standard_fonts/",
+      wasmUrl: "/wasm/",
+    });
+    const promise = task.promise.catch((error: unknown) => {
+      pdfDocumentCache.delete(src);
+      throw error;
+    });
+    entry = { promise, refCount: 0 };
+    pdfDocumentCache.set(src, entry);
+  }
+  entry.refCount += 1;
+  return entry.promise;
+}
+
+function releasePdfDocument(src: string) {
+  const entry = pdfDocumentCache.get(src);
+  if (!entry) return;
+  entry.refCount -= 1;
+  if (entry.refCount > 0) return;
+  pdfDocumentCache.delete(src);
+  void entry.promise
+    .then((doc) => {
+      if (typeof doc.destroy === "function") return doc.destroy();
+      return undefined;
+    })
+    .catch(() => undefined);
 }
 
 function viewerMessageFor(error: unknown) {
@@ -47,7 +101,16 @@ function pause(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-export function PdfPage({ src, pageNumber, zoom, rotation, compact = false, onReady }: PdfPageProps) {
+export function PdfPage({
+  src,
+  authSrc,
+  pageNumber,
+  zoom,
+  rotation,
+  compact = false,
+  onReady,
+}: PdfPageProps) {
+  const resolvedSrc = authSrc || src;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
   const [preview, setPreview] = useState<PreviewState>({
@@ -58,18 +121,7 @@ export function PdfPage({ src, pageNumber, zoom, rotation, compact = false, onRe
 
   useEffect(() => {
     let disposed = false;
-    let loadingTask: { destroy?: () => Promise<void> } | null = null;
-    let pdfDocument: { destroy?: () => Promise<void> } | null = null;
-
-    async function disposeAttempt() {
-      if (typeof pdfDocument?.destroy === "function") {
-        await pdfDocument.destroy().catch(() => undefined);
-        pdfDocument = null;
-      } else if (typeof loadingTask?.destroy === "function") {
-        await loadingTask.destroy().catch(() => undefined);
-      }
-      loadingTask = null;
-    }
+    let heldSrc: string | null = null;
 
     async function renderPage() {
       setPreview({ status: "loading", message: "Loading PDF preview..." });
@@ -82,17 +134,14 @@ export function PdfPage({ src, pageNumber, zoom, rotation, compact = false, onRe
 
         try {
           const pdfjs = await loadPdfJs();
+          if (heldSrc !== resolvedSrc) {
+            if (heldSrc) releasePdfDocument(heldSrc);
+            heldSrc = resolvedSrc;
+            await acquirePdfDocument(pdfjs, resolvedSrc);
+          }
+          if (disposed) return;
 
-          const task = pdfjs.getDocument({
-            url: src,
-            cMapUrl: "/cmaps/",
-            cMapPacked: true,
-            standardFontDataUrl: "/standard_fonts/",
-            wasmUrl: "/wasm/",
-          });
-          loadingTask = task;
-          const loadedPdf = await task.promise;
-          pdfDocument = loadedPdf;
+          const loadedPdf = await pdfDocumentCache.get(resolvedSrc)!.promise;
           const loadedPage = await loadedPdf.getPage(pageNumber);
           if (disposed || !canvasRef.current) return;
 
@@ -122,8 +171,11 @@ export function PdfPage({ src, pageNumber, zoom, rotation, compact = false, onRe
         } catch (error) {
           if (error instanceof Error && error.name === "RenderingCancelledException") return;
           lastError = error;
+          if (heldSrc) {
+            releasePdfDocument(heldSrc);
+            heldSrc = null;
+          }
           if (!isRetryablePreviewError(error) || attempt === retryDelays.length - 1) break;
-          await disposeAttempt();
         }
       }
 
@@ -136,13 +188,17 @@ export function PdfPage({ src, pageNumber, zoom, rotation, compact = false, onRe
     return () => {
       disposed = true;
       renderTaskRef.current?.cancel();
-      void disposeAttempt();
+      if (heldSrc) releasePdfDocument(heldSrc);
     };
-  }, [src, pageNumber, zoom, rotation, onReady, retryVersion]);
+  }, [resolvedSrc, pageNumber, zoom, rotation, onReady, retryVersion]);
 
   return (
     <div className="pdf-page">
-      <canvas ref={canvasRef} aria-label={"Rendered PDF page " + pageNumber} />
+      <canvas
+        ref={canvasRef}
+        aria-hidden={compact ? true : undefined}
+        aria-label={compact ? undefined : "Rendered PDF page " + pageNumber}
+      />
       {preview.status !== "ready" ? (
         <div
           className={"viewer-message is-" + preview.status + (compact ? " is-compact" : "")}

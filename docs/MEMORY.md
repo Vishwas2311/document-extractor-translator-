@@ -1,9 +1,9 @@
 # CareTranslate Studio Project Memory
 
 **Purpose:** concise, durable context for humans and AI tools
-**Current phase:** functional POC; production readiness work remains
+**Current phase:** local PRD-ready build (auth + processing profiles + worker hardening); full Azure production platform remains a target
 **Last reviewed:** 2026-08-02
-**Code baseline:** commit `14518cc` on `main`
+**Code baseline:** local PRD-ready changes on top of prior `main`
 
 > This file records current facts and approved decisions. It is not a session transcript, task backlog, or place for secrets. Verify volatile facts against the code and deployment before acting.
 
@@ -56,7 +56,13 @@ Never describe a production target as implemented.
 
 The core ordering invariant is: **upload → extract → normalize → detect language → translate → validate → persist → review/export**.
 
-The current Azure OpenAI request batches contain the full extracted source text selected for translation. There is no production classification/policy gateway or pseudonymization boundary. This is one reason the POC remains restricted to synthetic or explicitly approved de-identified data.
+The default LLM path uses the backend Data Security Gateway with
+`GENAI_PSEUDONYMIZED` (deterministic token replacement for emails/phones/URLs/IDs).
+`GENAI_SYNTHETIC_POC` may still send raw synthetic text when
+`ALLOW_SYNTHETIC_RAW_LLM=true`. Confidential/restricted data cannot use the
+synthetic raw path. Document API routes require `Authorization: Bearer` when
+`AUTH_REQUIRED=true` (default). Full Entra/APIM/private networking remains a
+production target, not a local claim.
 
 ## 5. Current technology snapshot
 

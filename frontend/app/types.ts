@@ -105,12 +105,16 @@ export interface DocumentDetail {
   updated_at: string;
   pages?: PageResult[];
   demo?: boolean;
+  processing_profile?: string | null;
+  data_class?: string | null;
 }
 
 export interface DocumentCreateResponse {
   document_id: string;
   status: DocumentStatus;
   status_url: string;
+  processing_profile?: string | null;
+  data_class?: string | null;
 }
 
 export interface PageSummary {
@@ -135,6 +139,8 @@ export interface DocumentSummary {
   page_count?: number | null;
   source_languages: string[];
   target_language: string;
+  processing_profile?: string | null;
+  data_class?: string | null;
   error_code?: string | null;
   safe_error_message?: string | null;
   created_at: string;
@@ -155,4 +161,22 @@ export interface HealthStatus {
     document_intelligence: boolean;
     openai: boolean;
   };
+  /** Present on current backend readiness; optional for older POC backends. */
+  auth_required?: boolean;
+  default_processing_profile?: string;
+  default_data_class?: string;
+  openai_deployment_configured?: boolean;
+  database?: string;
+  storage?: string;
+  worker?: string;
 }
+
+export interface SessionStatus {
+  authenticated: boolean;
+  auth_required: boolean;
+  subject: string | null;
+  security_label: string;
+  data_policy: string;
+}
+
+export type RetryMode = "resume" | "retranslate" | "reprocess";

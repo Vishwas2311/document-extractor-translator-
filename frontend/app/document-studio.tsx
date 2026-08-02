@@ -14,15 +14,17 @@ import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
   checkHealth,
+  checkSession,
   deleteDocument,
-  downloadUrl,
+  downloadArtifact,
+  fetchSourceBlobUrl,
   getDocument,
   getPage,
+  hasApiAuthToken,
   isTerminal,
   listDocuments,
   listPageSummaries,
   retryDocument,
-  sourceUrl,
   uploadDocument,
 } from "./lib/api";
 import { PdfPage } from "./pdf-page";
@@ -33,10 +35,66 @@ import type {
   HealthStatus,
   PageResult,
   PageSummary,
+  SessionStatus,
   TableCell,
   TableResult,
   TextBlock,
 } from "./types";
+
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  ".pdf",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".tif",
+  ".tiff",
+  ".bmp",
+]);
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+function fileExtension(filename: string): string {
+  const index = filename.lastIndexOf(".");
+  return index >= 0 ? filename.slice(index).toLowerCase() : "";
+}
+
+function validateUploadFile(file: File): string | null {
+  if (!ALLOWED_UPLOAD_EXTENSIONS.has(fileExtension(file.name))) {
+    return "Unsupported file type. Upload PDF, PNG, JPEG, TIFF, or BMP.";
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return "File exceeds the 50 MB upload limit.";
+  }
+  return null;
+}
+
+/** Convert page geometry units to CSS pixels at the given zoom. */
+function dimensionToCssPixels(value: number, unit: string, zoom = 1): number {
+  const normalized = unit.toLowerCase();
+  if (normalized === "inch" || normalized === "inches" || normalized === "in") {
+    return value * 96 * zoom;
+  }
+  if (normalized === "pixel" || normalized === "pixels" || normalized === "px") {
+    return value * zoom;
+  }
+  if (normalized === "point" || normalized === "points" || normalized === "pt") {
+    return value * (96 / 72) * zoom;
+  }
+  // Azure Document Intelligence commonly reports inches; fall back safely.
+  return value * 96 * zoom;
+}
+
+function isPdfContentType(contentType: string): boolean {
+  return contentType === "application/pdf" || contentType.includes("pdf");
+}
+
+function isImageContentType(contentType: string): boolean {
+  return (
+    contentType === "image/png" ||
+    contentType === "image/jpeg" ||
+    contentType === "image/jpg" ||
+    contentType === "image/bmp"
+  );
+}
 
 type InspectorTab = "extracted" | "translated" | "json";
 
@@ -376,9 +434,8 @@ function displayLanguage(language: string) {
 }
 
 function thumbnailZoom(dimensions: { width: number; unit: string }) {
-  const widthInPdfPoints = dimensions.unit.toLowerCase() === "inch"
-    ? dimensions.width * 72
-    : dimensions.width;
+  const widthInCssPixels = dimensionToCssPixels(dimensions.width, dimensions.unit, 1);
+  const widthInPdfPoints = widthInCssPixels * (72 / 96);
   return 78 / Math.max(widthInPdfPoints, 1);
 }
 
@@ -853,6 +910,7 @@ function DocumentListPanel({
   loading,
   error,
   currentDocumentId,
+  backendConnected,
   onClose,
   onOpen,
   onDelete,
@@ -862,6 +920,7 @@ function DocumentListPanel({
   loading: boolean;
   error: string | null;
   currentDocumentId: string | null;
+  backendConnected: boolean;
   onClose: () => void;
   onOpen: (documentId: string) => void;
   onDelete: (item: DocumentSummary) => void;
@@ -881,9 +940,12 @@ function DocumentListPanel({
             <Icon name="close" />
           </button>
         </div>
-        {loading ? <p className="doc-panel-status">Loading…</p> : null}
-        {error ? <p className="doc-panel-status is-error">{error}</p> : null}
-        {!loading && !error && !items.length ? (
+        {!backendConnected ? (
+          <p className="doc-panel-status is-error">Backend not connected</p>
+        ) : null}
+        {backendConnected && loading ? <p className="doc-panel-status">Loading…</p> : null}
+        {backendConnected && error ? <p className="doc-panel-status is-error">{error}</p> : null}
+        {backendConnected && !loading && !error && !items.length ? (
           <p className="doc-panel-status">No documents uploaded yet.</p>
         ) : null}
         <ul className="doc-panel-list">
@@ -934,6 +996,8 @@ export function DocumentStudio() {
   const [error, setError] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [session, setSession] = useState<SessionStatus | null>(null);
+  const [sourceBlobUrl, setSourceBlobUrl] = useState<string | null>(null);
   const [isDocumentListOpen, setIsDocumentListOpen] = useState(false);
   const [documentList, setDocumentList] = useState<DocumentSummary[]>([]);
   const [documentListLoading, setDocumentListLoading] = useState(false);
@@ -959,22 +1023,70 @@ export function DocumentStudio() {
     checkHealth({ signal: controller.signal })
       .then((result) => setHealth(result))
       .catch(() => undefined);
+    checkSession({ signal: controller.signal })
+      .then((result) => setSession(result))
+      .catch(() => undefined);
     return () => controller.abort();
   }, []);
+
+  // PDF/image previews cannot set Authorization headers. Fetch once with auth and use
+  // an object URL for pdf.js / <img>.
+  useEffect(() => {
+    if (document.demo || !API_BASE || !document.id) {
+      setSourceBlobUrl(null);
+      return;
+    }
+    let revoked = false;
+    let objectUrl: string | null = null;
+    const controller = new AbortController();
+    fetchSourceBlobUrl(document.id, { signal: controller.signal })
+      .then((url) => {
+        if (revoked) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setSourceBlobUrl(url);
+      })
+      .catch(() => {
+        if (!revoked) setSourceBlobUrl(null);
+      });
+    return () => {
+      revoked = true;
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      setSourceBlobUrl(null);
+    };
+  }, [document.demo, document.id]);
 
   const page = document.demo
     ? pages.find((item) => item.page.page_number === currentPage) ?? pages[0]
     : pageCache[currentPage];
   const pageCount = document.page_count ?? (document.demo ? pages.length : pageSummaries.length);
-  const realSource = !document.demo && API_BASE ? sourceUrl(document.id) : null;
-  const canPreviewSource = Boolean(realSource && document.content_type === "application/pdf");
+  const realSource = !document.demo && API_BASE ? sourceBlobUrl : null;
+  const canPreviewPdf = Boolean(realSource && isPdfContentType(document.content_type));
+  const canPreviewImage = Boolean(realSource && isImageContentType(document.content_type));
+  const canPreviewSource = canPreviewPdf || canPreviewImage;
   const viewerPageCount = pageCount || (canPreviewSource ? 1 : 0);
+  const pageUnit = page?.page.unit ?? "inch";
   const canvasWidth = page
-    ? page.page.width * 96 * zoom
-    : sourceViewport?.width ?? 8.5 * 96 * zoom;
+    ? dimensionToCssPixels(page.page.width, pageUnit, zoom)
+    : sourceViewport?.width ?? dimensionToCssPixels(8.5, "inch", zoom);
   const canvasHeight = page
-    ? page.page.height * 96 * zoom
-    : sourceViewport?.height ?? 11 * 96 * zoom;
+    ? dimensionToCssPixels(page.page.height, pageUnit, zoom)
+    : sourceViewport?.height ?? dimensionToCssPixels(11, "inch", zoom);
+
+  const diOnline = Boolean(health?.azure_configured.document_intelligence);
+  const openaiOnline = Boolean(
+    health?.azure_configured.openai && (health.openai_deployment_configured ?? true),
+  );
+  const authBannerLabel = session
+    ? session.authenticated
+      ? "Local authenticated API · synthetic data only"
+      : "Unauthenticated POC"
+    : hasApiAuthToken()
+      ? "Local authenticated API · synthetic data only"
+      : "Unauthenticated POC";
 
   const handleSourceReady = useCallback((width: number, height: number) => {
     setSourceViewport({ width, height });
@@ -1117,15 +1229,15 @@ export function DocumentStudio() {
     if (!viewer) return;
 
     const baseWidth = page
-      ? page.page.width * 96
+      ? dimensionToCssPixels(page.page.width, page.page.unit, 1)
       : sourceViewport
         ? sourceViewport.width / zoom
-        : 8.5 * 96;
+        : dimensionToCssPixels(8.5, "inch", 1);
     const baseHeight = page
-      ? page.page.height * 96
+      ? dimensionToCssPixels(page.page.height, page.page.unit, 1)
       : sourceViewport
         ? sourceViewport.height / zoom
-        : 11 * 96;
+        : dimensionToCssPixels(11, "inch", 1);
     const rotated = rotation % 180 !== 0;
     const visualWidth = rotated ? baseHeight : baseWidth;
     const visualHeight = rotated ? baseWidth : baseHeight;
@@ -1213,6 +1325,11 @@ export function DocumentStudio() {
     // second poll loop that interleaves state updates with the first.
     if (busy) return;
     setError(null);
+    const validationError = validateUploadFile(file);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     if (!API_BASE) {
       setError("Backend not connected. Copy .env.local.example to .env.local and run the Python API before uploading.");
       return;
@@ -1227,7 +1344,7 @@ export function DocumentStudio() {
       setDocument({
         id: created.document_id,
         original_filename: file.name,
-        content_type: file.type || "application/pdf",
+        content_type: file.type || "",
         status: created.status,
         page_count: null,
         current_stage: "Upload accepted",
@@ -1235,6 +1352,8 @@ export function DocumentStudio() {
         safe_error_message: null,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        processing_profile: created.processing_profile ?? null,
+        data_class: created.data_class ?? null,
       });
       resetPageState();
       await followJob(created.document_id, controller.signal);
@@ -1251,7 +1370,22 @@ export function DocumentStudio() {
 
   function handleCancel() {
     activeRunRef.current?.abort();
-    setError("Cancelled.");
+    activeRunRef.current = null;
+    setBusy(false);
+    if (document.demo) {
+      setError("Cancelled.");
+      return;
+    }
+    // Keep the document visible with a terminal local status so Retry works and the
+    // UI is not stuck in a permanent busy/progress state.
+    setDocument((previous) => ({
+      ...previous,
+      status: "failed",
+      current_stage: "Cancelled",
+      progress_percent: previous.progress_percent,
+      safe_error_message: "Processing was cancelled. You can retry when ready.",
+    }));
+    setError("Cancelled. You can retry processing.");
   }
 
   async function openDocument(documentId: string) {
@@ -1285,7 +1419,12 @@ export function DocumentStudio() {
 
   async function openDocumentListPanel() {
     setIsDocumentListOpen(true);
-    if (!API_BASE) return;
+    if (!API_BASE) {
+      setDocumentList([]);
+      setDocumentListError(null);
+      setDocumentListLoading(false);
+      return;
+    }
     setDocumentListLoading(true);
     setDocumentListError(null);
     try {
@@ -1339,7 +1478,7 @@ export function DocumentStudio() {
     setBusy(true);
     setError(null);
     try {
-      await retryDocument(document.id, { signal: controller.signal });
+      await retryDocument(document.id, "resume", { signal: controller.signal });
       if (controller.signal.aborted) return;
       setPageSummaries([]);
       setPageCache({});
@@ -1356,7 +1495,7 @@ export function DocumentStudio() {
     }
   }
 
-  function handleDownload(artifact: "page" | "extracted" | "bilingual") {
+  async function handleDownload(artifact: "page" | "extracted" | "bilingual") {
     if (document.demo) {
       const payload = artifact === "page" ? page : { ...document, pages };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -1368,7 +1507,20 @@ export function DocumentStudio() {
       URL.revokeObjectURL(url);
       return;
     }
-    window.open(downloadUrl(document.id, artifact, currentPage), "_blank", "noopener,noreferrer");
+    try {
+      await downloadArtifact(document.id, artifact, currentPage);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Download failed.");
+    }
+  }
+
+  async function handleCopyPageJson() {
+    if (!page) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(page, null, 2));
+    } catch {
+      setError("Clipboard copy failed. Check browser permissions and try again.");
+    }
   }
 
   const sourceLanguages = page
@@ -1415,21 +1567,26 @@ export function DocumentStudio() {
             <strong>CareTranslate <em>Studio</em></strong>
           </div>
         </div>
-        <div className="service-pills" aria-label="Connected service architecture">
+        <div className="service-pills" aria-label="Service status">
           <span className="service-node">
             <span className="service-monogram" aria-hidden="true">DI</span>
             <span className="service-copy"><small>Extract &amp; structure</small><strong>Document Intelligence</strong></span>
-            <i className="service-online" aria-label="Connected" />
+            <i
+              className={diOnline ? "service-online" : "service-offline"}
+              aria-label={diOnline ? "Available" : "Unavailable"}
+            />
           </span>
           <span className="service-connector" aria-hidden="true"><i /></span>
           <span className="service-node">
             <span className="service-monogram" aria-hidden="true">AI</span>
-            <span className="service-copy"><small>Translate to English</small><strong>Azure OpenAI · GPT-5-mini</strong></span>
-            <i className="service-online" aria-label="Connected" />
+            <span className="service-copy"><small>Translate to English</small><strong>Azure OpenAI</strong></span>
+            <i
+              className={openaiOnline ? "service-online" : "service-offline"}
+              aria-label={openaiOnline ? "Available" : health ? "Unavailable" : "Offline"}
+            />
           </span>
         </div>
         <div className="header-actions">
-          <span className="secure-workspace"><i aria-hidden="true" /> Secure workspace</span>
           <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
             <Icon name="folder" /> Recent
           </button>
@@ -1443,6 +1600,7 @@ export function DocumentStudio() {
       </header>
 
       <DocumentListPanel
+        backendConnected={Boolean(API_BASE)}
         currentDocumentId={document.demo ? null : document.id}
         error={documentListError}
         items={documentList}
@@ -1453,6 +1611,21 @@ export function DocumentStudio() {
         open={isDocumentListOpen}
       />
 
+      <div className="notice-bar auth-banner" role="status">
+        <span className="notice-icon">i</span>
+        <span className="notice-copy">
+          <strong>{authBannerLabel}</strong>
+          <span>
+            {session?.data_policy ?? "Synthetic or approved de-identified data only."}
+            {!diOnline || !openaiOnline
+              ? " Service pills reflect configured Azure endpoints from /health/ready."
+              : ""}
+          </span>
+        </span>
+      </div>
+
+      <div className="studio-body">
+      <div className="studio-main-column">
       <section className="document-header">
         <div className="filename-group">
           <span className="file-glyph" aria-hidden="true"><i />PDF</span>
@@ -1469,15 +1642,27 @@ export function DocumentStudio() {
               <span>{pageCount || "—"} pages</span>
               <i aria-hidden="true" />
               <span>English output</span>
+              {document.processing_profile ? (
+                <>
+                  <i aria-hidden="true" />
+                  <span>{document.processing_profile}</span>
+                </>
+              ) : null}
+              {document.data_class ? (
+                <>
+                  <i aria-hidden="true" />
+                  <span>{document.data_class}</span>
+                </>
+              ) : null}
             </p>
           </div>
         </div>
         <div className="document-actions">
           {!document.demo && (document.status === "failed" || document.status === "needs_review") ? (
-            <button className="secondary-button" disabled={busy} onClick={handleRetry}><Icon name="refresh" /> Retry</button>
+            <button className="secondary-button" disabled={busy} onClick={() => void handleRetry()}><Icon name="refresh" /> Retry</button>
           ) : null}
-          <button className="secondary-button" disabled={!page} onClick={() => handleDownload("page")}><Icon name="download" /> Page JSON</button>
-          <button className="secondary-button export-button" disabled={!page} onClick={() => handleDownload("bilingual")}><Icon name="download" /> Full export</button>
+          <button className="secondary-button" disabled={!page} onClick={() => void handleDownload("page")}><Icon name="download" /> Page JSON</button>
+          <button className="secondary-button export-button" disabled={!page} onClick={() => void handleDownload("bilingual")}><Icon name="download" /> Full export</button>
         </div>
       </section>
 
@@ -1518,7 +1703,7 @@ export function DocumentStudio() {
         </div>
       ) : null}
 
-      <section className="workspace-grid">
+      <section className="workspace-grid workspace-grid--main">
         <aside className="thumbnail-rail" aria-label="Document pages">
           <div className="rail-heading">
             <span>Document pages</span>
@@ -1554,13 +1739,21 @@ export function DocumentStudio() {
                     <DemoThumbnail
                       page={pages.find((candidate) => candidate.page.page_number === item.pageNumber)!}
                     />
-                  ) : realSource ? (
+                  ) : realSource && canPreviewPdf ? (
                     <PdfPage
+                      authSrc={realSource}
                       compact
                       pageNumber={item.pageNumber}
                       rotation={0}
                       src={realSource}
                       zoom={thumbnailZoom(item)}
+                    />
+                  ) : realSource && canPreviewImage ? (
+                    <img
+                      alt=""
+                      aria-hidden="true"
+                      src={realSource}
+                      style={{ display: "block", height: "100%", objectFit: "contain", width: "100%" }}
                     />
                   ) : null}
                 </span>
@@ -1587,7 +1780,7 @@ export function DocumentStudio() {
               <button
                 aria-label="Next page"
                 className="toolbar-text-button"
-                disabled={currentPage >= viewerPageCount || !page}
+                disabled={currentPage >= viewerPageCount}
                 onClick={() => selectPage(currentPage + 1)}
               >
                 Next <Icon name="arrowRight" />
@@ -1646,14 +1839,44 @@ export function DocumentStudio() {
                     page={displayPage ?? page}
                     selectedId={selectedId}
                   />
-                ) : realSource ? (
+                ) : canPreviewPdf && realSource ? (
                   <div className="real-page-frame">
                     <PdfPage
+                      authSrc={realSource}
                       onReady={handleSourceReady}
                       pageNumber={currentPage}
                       rotation={0}
                       src={realSource}
                       zoom={zoom * (96 / 72)}
+                    />
+                    {overlays && page ? (
+                      <OverlayLayer
+                        hoveredId={hoveredId}
+                        onHover={setHoveredId}
+                        onSelect={setSelectedId}
+                        page={displayPage ?? page}
+                        selectedId={selectedId}
+                      />
+                    ) : null}
+                  </div>
+                ) : canPreviewImage && realSource ? (
+                  <div className="real-page-frame">
+                    <img
+                      alt={"Source preview for " + document.original_filename}
+                      className="source-image-preview"
+                      onLoad={(event) => {
+                        const image = event.currentTarget;
+                        handleSourceReady(image.naturalWidth * zoom, image.naturalHeight * zoom);
+                      }}
+                      src={realSource}
+                      style={{
+                        display: "block",
+                        height: "auto",
+                        maxWidth: "100%",
+                        transform: "scale(" + zoom + ")",
+                        transformOrigin: "top left",
+                        width: "auto",
+                      }}
                     />
                     {overlays && page ? (
                       <OverlayLayer
@@ -1681,43 +1904,10 @@ export function DocumentStudio() {
             <span className="viewer-tip">Hover an overlay to follow it in the analysis panel</span>
           </div>
         </section>
+      </section>
+      </div>
 
         <aside className="inspector-panel">
-          <div className="inspector-heading">
-            <div className="inspector-heading-copy">
-              <div className="inspector-title-line">
-                <span className="eyebrow">Page intelligence</span>
-                <span className="sync-badge"><i aria-hidden="true" /> Synced</span>
-              </div>
-              <div className="inspector-page-line">
-                <h2>Page {currentPage} <span>of {viewerPageCount}</span></h2>
-                <span className="page-structure">
-                  {page ? `${standaloneBlocks.length} regions · ${page.tables.length} ${page.tables.length === 1 ? "table" : "tables"}` : "Awaiting analysis"}
-                </span>
-              </div>
-            </div>
-            <button aria-label="Copy page JSON" disabled={!page} onClick={() => page && navigator.clipboard.writeText(JSON.stringify(page, null, 2))}><Icon name="copy" /></button>
-          </div>
-          <div className="language-summary">
-            <span className="language-summary-label">Translation route</span>
-            <strong className="language-token">{sourceLanguages.join(" + ") || "—"}</strong>
-            <span className="language-arrow"><Icon name="arrowRight" /></span>
-            <strong className="language-token is-target">English</strong>
-          </div>
-          <div className="tab-list" role="tablist" aria-label="Page results">
-            {(["extracted", "translated", "json"] as InspectorTab[]).map((tab) => (
-              <button
-                aria-selected={activeTab === tab}
-                className={activeTab === tab ? "active" : ""}
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                role="tab"
-              >
-                {tab === "extracted" ? "Extracted" : tab === "translated" ? "Translated" : "JSON"}
-              </button>
-            ))}
-          </div>
-
           <div className="inspector-content" ref={inspectorContentRef}>
             {activeTab === "translated" && document.status === "failed" && document.safe_error_message ? (
               <div className="translation-status-message" role="status">
@@ -1826,12 +2016,13 @@ export function DocumentStudio() {
                         onBlur={() => setHoveredId(null)}
                         onMouseEnter={() => setHoveredId(block.block_id)}
                         onMouseLeave={() => setHoveredId(null)}
+                        type="button"
                       >
                         <span className="result-card-topline">
                           <span className="region-number">{block.reading_order}</span>
                           <span className="role-chip">{block.role ?? "Body"}</span>
                           <span className="language-chip">{displayLanguage(block.source_language)}</span>
-                          {block.ocr_confidence ? <span className="confidence-chip">{Math.round(block.ocr_confidence * 100)}% OCR</span> : null}
+                          {block.ocr_confidence != null ? <span className="confidence-chip">{Math.round(block.ocr_confidence * 100)}% OCR</span> : null}
                           {block.review_required ? <span className="review-chip">Review</span> : null}
                         </span>
                         {activeTab === "translated" ? (
@@ -1849,6 +2040,42 @@ export function DocumentStudio() {
               </>
             ) : null}
           </div>
+
+          <div className="inspector-dock" aria-label="Page analysis controls">
+            <div className="inspector-dock-meta">
+              <span className="eyebrow">Page intelligence</span>
+              <strong>Page {currentPage} <span>of {viewerPageCount}</span></strong>
+              <span className="page-structure">
+                {page ? `${standaloneBlocks.length} regions · ${page.tables.length} ${page.tables.length === 1 ? "table" : "tables"}` : "Awaiting analysis"}
+              </span>
+            </div>
+            <div className="language-summary">
+              <span className="language-summary-label">Route</span>
+              <strong className="language-token">{sourceLanguages.join(" + ") || "—"}</strong>
+              <span className="language-arrow"><Icon name="arrowRight" /></span>
+              <strong className="language-token is-target">English</strong>
+            </div>
+            <div className="inspector-dock-actions">
+              <div className="tab-list" role="tablist" aria-label="Page results">
+                {(["extracted", "translated", "json"] as InspectorTab[]).map((tab) => (
+                  <button
+                    aria-selected={activeTab === tab}
+                    className={activeTab === tab ? "active" : ""}
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    role="tab"
+                    type="button"
+                  >
+                    {tab === "extracted" ? "Extracted" : tab === "translated" ? "Translated" : "JSON"}
+                  </button>
+                ))}
+              </div>
+              <button aria-label="Copy page JSON" disabled={!page} onClick={() => void handleCopyPageJson()} type="button">
+                <Icon name="copy" />
+              </button>
+            </div>
+          </div>
+
           {selectedBlock || selectedCell ? (
             <div className="selection-footer">
               <span>
@@ -1856,11 +2083,11 @@ export function DocumentStudio() {
                   ? `Region ${selectedBlock.reading_order} selected`
                   : `Table ${selectedCell!.tableIndex + 1} · Row ${selectedCell!.cell.row_index + 1} · Column ${selectedCell!.cell.column_index + 1} selected`}
               </span>
-              <button onClick={() => setSelectedId(null)}>Clear</button>
+              <button onClick={() => setSelectedId(null)} type="button">Clear</button>
             </div>
           ) : null}
         </aside>
-      </section>
+      </div>
     </main>
   );
 }

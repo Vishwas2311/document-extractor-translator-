@@ -1,13 +1,15 @@
+import asyncio
 import hashlib
 from datetime import UTC, datetime
 
 import structlog
 
-from app.core.enums import DocumentStatus, JobStatus, TranslationStatus
+from app.core.enums import DocumentStatus, JobStatus, ProcessingProfile, TranslationStatus
 from app.core.exceptions import (
     AppError,
     AzureServiceError,
     JobLeaseLostError,
+    PolicyBlockedError,
     TranslationValidationError,
 )
 from app.integrations.azure_openai.translator import AzureOpenAITranslator
@@ -23,6 +25,7 @@ from app.schemas.translation import (
 )
 from app.services.export import ExportService
 from app.services.language import LanguageService
+from app.services.security_gateway import SecurityGateway
 from app.services.validation import TranslationValidator
 from app.storage.local import LocalArtifactStorage
 
@@ -40,12 +43,14 @@ class ProcessingService:
         language_service: LanguageService,
         validator: TranslationValidator,
         exporter: ExportService,
+        gateway: SecurityGateway,
         *,
         max_batch_blocks: int,
         max_batch_chars: int,
         ocr_review_threshold: float,
         worker_id: str,
         job_lease_seconds: int,
+        job_heartbeat_seconds: int = 30,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -55,11 +60,13 @@ class ProcessingService:
         self.language_service = language_service
         self.validator = validator
         self.exporter = exporter
+        self.gateway = gateway
         self.max_batch_blocks = max_batch_blocks
         self.max_batch_chars = max_batch_chars
         self.ocr_review_threshold = ocr_review_threshold
         self.worker_id = worker_id
         self.job_lease_seconds = job_lease_seconds
+        self.job_heartbeat_seconds = max(5, job_heartbeat_seconds)
 
     async def _stage(
         self, document_id: str, job_id: str, status: DocumentStatus, progress: int
@@ -72,11 +79,25 @@ class ProcessingService:
             error_code=None,
             safe_error_message=None,
         )
+        await self.repository.update_job(job_id, stage=status.value)
         renewed = await self.repository.renew_lease(job_id, self.worker_id, self.job_lease_seconds)
         if not renewed:
             raise JobLeaseLostError(
                 "This worker's job lease expired and was reclaimed by another worker."
             )
+
+    async def _heartbeat_loop(self, job_id: str, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self.job_heartbeat_seconds)
+                return
+            except TimeoutError:
+                renewed = await self.repository.renew_lease(
+                    job_id, self.worker_id, self.job_lease_seconds
+                )
+                if not renewed:
+                    stop.set()
+                    return
 
     async def _mark_pages_failed(self, document_id: str, page_numbers: list[int]) -> None:
         for number in page_numbers:
@@ -132,7 +153,12 @@ class ProcessingService:
         )
         return response
 
-    async def _translate(self, document: CanonicalDocument) -> bool:
+    async def _translate(
+        self,
+        document: CanonicalDocument,
+        *,
+        profile: ProcessingProfile,
+    ) -> bool:
         review_required = False
         targets = list(document.blocks)
         cell_targets: dict[str, TableCell] = {}
@@ -164,14 +190,20 @@ class ProcessingService:
                 block.review_required = True
                 block.warnings.append(f"OCR confidence is below {self.ocr_review_threshold:.0%}.")
                 review_required = True
+            if len(block.source_text) > self.max_batch_chars:
+                block.translation_status = TranslationStatus.NEEDS_REVIEW
+                block.review_required = True
+                block.warnings.append(
+                    f"Block exceeds the {self.max_batch_chars}-character translation limit."
+                )
+                review_required = True
+                continue
             if self.language_service.should_translate(block.source_language):
                 block.translation_status = TranslationStatus.PENDING
                 translatable.append(block)
             elif block.source_language == "en" or not self.language_service.has_letters(
                 block.source_text
             ):
-                # No alphabetic content (page numbers, dates, IDs, bare punctuation) - there
-                # is no language here to translate, regardless of what detect() returned.
                 block.translated_text = block.source_text
                 block.translation_status = TranslationStatus.NOT_REQUIRED
             else:
@@ -181,7 +213,7 @@ class ProcessingService:
                 review_required = True
 
         for batch_index, blocks in enumerate(self._batches(translatable), start=1):
-            inputs = [
+            raw_inputs = [
                 TranslationInput(
                     block_id=block.block_id,
                     source_language=block.source_language,
@@ -189,17 +221,18 @@ class ProcessingService:
                 )
                 for block in blocks
             ]
-            request = TranslationBatchRequest(blocks=inputs)
-            hash_input = f"{TRANSLATION_PROMPT_VERSION}\n{request.model_dump_json()}"
+            prepared = self.gateway.prepare_translation_inputs(profile, raw_inputs)
+            request = TranslationBatchRequest(blocks=prepared.inputs)
+            hash_input = (
+                f"{TRANSLATION_PROMPT_VERSION}\n{profile.value}\n{request.model_dump_json()}"
+            )
             input_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
             artifact = f"translations/batch-{batch_index:04d}.json"
             try:
                 response = await self._resolve_batch_translation(
-                    document.document_id, artifact, input_hash, request, inputs
+                    document.document_id, artifact, input_hash, request, prepared.inputs
                 )
             except (AzureServiceError, TranslationValidationError) as exc:
-                # Isolate the failure to just this batch's blocks instead of failing the
-                # whole document - the rest of the document may translate fine.
                 failure_status = (
                     TranslationStatus.FILTERED
                     if isinstance(exc, AzureServiceError)
@@ -220,7 +253,8 @@ class ProcessingService:
                 )
                 continue
             translated_by_id = {
-                item.block_id: item.translated_text for item in response.translations
+                item.block_id: self.gateway.restore_text(item.translated_text, prepared.token_map)
+                for item in response.translations
             }
             for block in blocks:
                 block.translated_text = translated_by_id[block.block_id]
@@ -237,13 +271,27 @@ class ProcessingService:
             review_required = review_required or target.review_required
         return review_required
 
+    async def _finish_safe(
+        self,
+        document_id: str,
+        job_id: str,
+        *,
+        document_values: dict[str, object],
+        job_values: dict[str, object],
+    ) -> None:
+        await self.repository.finish_processing(
+            document_id,
+            job_id,
+            document_values=document_values,
+            job_values=job_values,
+            lease_owner=self.worker_id,
+        )
+
     async def process(self, document_id: str) -> None:
         document_record = await self.repository.get(document_id)
         job = await self.repository.latest_job(document_id)
         claimed = await self.repository.claim_job(job.id, self.worker_id, self.job_lease_seconds)
         if not claimed:
-            # Another worker already owns this job's lease - nothing to do here. This is
-            # the normal outcome when two replicas race to pick up the same queued job.
             await logger.ainfo(
                 "job_claim_skipped",
                 document_id=document_id,
@@ -253,7 +301,36 @@ class ProcessingService:
             return
 
         page_numbers: list[int] = []
+        stop_heartbeat = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job.id, stop_heartbeat))
         try:
+            try:
+                profile = self.gateway.select_profile(
+                    data_class=getattr(document_record, "data_class", "synthetic"),
+                    requested_profile=getattr(document_record, "processing_profile", None),
+                    trusted_stored=True,
+                )
+            except PolicyBlockedError as exc:
+                await self._finish_safe(
+                    document_id,
+                    job.id,
+                    document_values={
+                        "status": DocumentStatus.FAILED.value,
+                        "current_stage": DocumentStatus.FAILED.value,
+                        "error_code": exc.code,
+                        "safe_error_message": exc.message,
+                    },
+                    job_values={
+                        "status": JobStatus.FAILED.value,
+                        "error_code": exc.code,
+                        "safe_error_message": exc.message,
+                        "completed_at": datetime.now(UTC),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    },
+                )
+                return
+
             await self._stage(document_id, job.id, DocumentStatus.EXTRACTING, 15)
             raw_path = "raw/document_intelligence.json"
             if self.storage.exists(document_id, raw_path):
@@ -287,8 +364,6 @@ class ProcessingService:
                 canonical.model_dump(mode="json"),
             )
 
-            # Extraction is useful on its own. Persist page-level JSON before translation
-            # so an unavailable OpenAI service never discards successful OCR output.
             extracted_pages = self.exporter.page_results(
                 canonical,
                 DocumentStatus.NORMALIZING.value,
@@ -307,7 +382,7 @@ class ProcessingService:
             )
 
             await self._stage(document_id, job.id, DocumentStatus.TRANSLATING, 55)
-            review_required = await self._translate(canonical)
+            review_required = await self._translate(canonical, profile=profile)
             await self._stage(document_id, job.id, DocumentStatus.VALIDATING, 80)
             final_status = (
                 DocumentStatus.NEEDS_REVIEW if review_required else DocumentStatus.COMPLETED
@@ -339,6 +414,8 @@ class ProcessingService:
                 {
                     "schema_version": "1.0",
                     "document_id": document_id,
+                    "processing_profile": profile.value,
+                    "data_class": getattr(document_record, "data_class", "synthetic"),
                     "page_count": len(page_results),
                     "artifacts": [
                         "raw/document_intelligence.json",
@@ -348,7 +425,7 @@ class ProcessingService:
                     ],
                 },
             )
-            await self.repository.finish_processing(
+            await self._finish_safe(
                 document_id,
                 job.id,
                 document_values={
@@ -368,9 +445,6 @@ class ProcessingService:
                 },
             )
         except JobLeaseLostError:
-            # Our lease expired and another worker has already reclaimed this job - it
-            # owns the terminal write now. Writing here would race with (and could
-            # clobber) whatever that worker records, so we abandon the run silently.
             await logger.awarning(
                 "job_lease_lost_abandoning_run",
                 document_id=document_id,
@@ -378,24 +452,32 @@ class ProcessingService:
                 worker_id=self.worker_id,
             )
         except AppError as exc:
-            await self.repository.finish_processing(
-                document_id,
-                job.id,
-                document_values={
-                    "status": DocumentStatus.FAILED.value,
-                    "current_stage": DocumentStatus.FAILED.value,
-                    "error_code": exc.code,
-                    "safe_error_message": exc.message,
-                },
-                job_values={
-                    "status": JobStatus.FAILED.value,
-                    "error_code": exc.code,
-                    "safe_error_message": exc.message,
-                    "completed_at": datetime.now(UTC),
-                    "lease_owner": None,
-                    "lease_expires_at": None,
-                },
-            )
+            try:
+                await self._finish_safe(
+                    document_id,
+                    job.id,
+                    document_values={
+                        "status": DocumentStatus.FAILED.value,
+                        "current_stage": DocumentStatus.FAILED.value,
+                        "error_code": exc.code,
+                        "safe_error_message": exc.message,
+                    },
+                    job_values={
+                        "status": JobStatus.FAILED.value,
+                        "error_code": exc.code,
+                        "safe_error_message": exc.message,
+                        "completed_at": datetime.now(UTC),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    },
+                )
+            except JobLeaseLostError:
+                await logger.awarning(
+                    "job_lease_lost_on_failure_write",
+                    document_id=document_id,
+                    job_id=job.id,
+                )
+                return
             await self._mark_pages_failed(document_id, page_numbers)
             await logger.awarning(
                 "document_processing_failed",
@@ -404,26 +486,32 @@ class ProcessingService:
                 retryable=getattr(exc, "retryable", False),
             )
         except Exception:
-            await self.repository.finish_processing(
-                document_id,
-                job.id,
-                document_values={
-                    "status": DocumentStatus.FAILED.value,
-                    "current_stage": DocumentStatus.FAILED.value,
-                    "error_code": "processing_failed",
-                    "safe_error_message": "Document processing failed unexpectedly.",
-                },
-                job_values={
-                    "status": JobStatus.FAILED.value,
-                    "error_code": "processing_failed",
-                    "safe_error_message": "Document processing failed unexpectedly.",
-                    "completed_at": datetime.now(UTC),
-                    "lease_owner": None,
-                    "lease_expires_at": None,
-                },
-            )
+            try:
+                await self._finish_safe(
+                    document_id,
+                    job.id,
+                    document_values={
+                        "status": DocumentStatus.FAILED.value,
+                        "current_stage": DocumentStatus.FAILED.value,
+                        "error_code": "processing_failed",
+                        "safe_error_message": "Document processing failed unexpectedly.",
+                    },
+                    job_values={
+                        "status": JobStatus.FAILED.value,
+                        "error_code": "processing_failed",
+                        "safe_error_message": "Document processing failed unexpectedly.",
+                        "completed_at": datetime.now(UTC),
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                    },
+                )
+            except JobLeaseLostError:
+                return
             await self._mark_pages_failed(document_id, page_numbers)
             await logger.aexception(
                 "document_processing_failed_unexpectedly",
                 document_id=document_id,
             )
+        finally:
+            stop_heartbeat.set()
+            await heartbeat_task
