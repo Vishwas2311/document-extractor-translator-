@@ -56,3 +56,4 @@ class PageSummary(BaseModel):
     angle: float
     block_count: int
     table_count: int
+    review_required: bool = False

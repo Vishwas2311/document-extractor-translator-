@@ -3,6 +3,7 @@
 import {
   type ChangeEvent,
   type DragEvent,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -12,18 +13,156 @@ import {
 import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
+  checkHealth,
+  deleteDocument,
   downloadUrl,
   getDocument,
   getPage,
   isTerminal,
+  listDocuments,
+  listPageSummaries,
   retryDocument,
   sourceUrl,
   uploadDocument,
 } from "./lib/api";
 import { PdfPage } from "./pdf-page";
-import type { BoundingRegion, DocumentDetail, PageResult, TableCell, TableResult, TextBlock } from "./types";
+import type {
+  BoundingRegion,
+  DocumentDetail,
+  DocumentSummary,
+  HealthStatus,
+  PageResult,
+  PageSummary,
+  TableCell,
+  TableResult,
+  TextBlock,
+} from "./types";
 
 type InspectorTab = "extracted" | "translated" | "json";
+
+type IconName =
+  | "close"
+  | "trash"
+  | "folder"
+  | "plus"
+  | "refresh"
+  | "download"
+  | "flag"
+  | "arrowUp"
+  | "arrowRight"
+  | "arrowLeft"
+  | "table"
+  | "copy"
+  | "minus"
+  | "rotateLeft"
+  | "rotateRight";
+
+const iconPaths: Record<IconName, ReactNode> = {
+  close: (
+    <>
+      <line x1="18" x2="6" y1="6" y2="18" />
+      <line x1="6" x2="18" y1="6" y2="18" />
+    </>
+  ),
+  trash: (
+    <>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <line x1="10" x2="10" y1="11" y2="17" />
+      <line x1="14" x2="14" y1="11" y2="17" />
+    </>
+  ),
+  folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />,
+  plus: (
+    <>
+      <line x1="12" x2="12" y1="5" y2="19" />
+      <line x1="5" x2="19" y1="12" y2="12" />
+    </>
+  ),
+  refresh: (
+    <>
+      <path d="M21 12a9 9 0 1 1-2.8-6.5" />
+      <polyline points="21 4 21 10 15 10" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M12 3v11" />
+      <polyline points="7 10 12 15 17 10" />
+      <path d="M5 19h14" />
+    </>
+  ),
+  flag: (
+    <>
+      <path d="M5 21V4" />
+      <path d="M5 5h12l-2.2 4L17 13H5" />
+    </>
+  ),
+  arrowUp: (
+    <>
+      <line x1="12" x2="12" y1="19" y2="5" />
+      <polyline points="5 12 12 5 19 12" />
+    </>
+  ),
+  arrowRight: (
+    <>
+      <line x1="5" x2="19" y1="12" y2="12" />
+      <polyline points="12 5 19 12 12 19" />
+    </>
+  ),
+  arrowLeft: (
+    <>
+      <line x1="19" x2="5" y1="12" y2="12" />
+      <polyline points="12 19 5 12 12 5" />
+    </>
+  ),
+  table: (
+    <>
+      <rect height="16" rx="2" width="18" x="3" y="4" />
+      <line x1="3" x2="21" y1="10" y2="10" />
+      <line x1="9" x2="9" y1="4" y2="20" />
+    </>
+  ),
+  copy: (
+    <>
+      <rect height="11" rx="1.5" width="11" x="9" y="9" />
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+    </>
+  ),
+  minus: <line x1="5" x2="19" y1="12" y2="12" />,
+  rotateLeft: (
+    <>
+      <path d="M9 4H5v4" />
+      <path d="M5.2 13a8 8 0 1 0 2.1-8.6L5 8" />
+    </>
+  ),
+  rotateRight: (
+    <>
+      <path d="M15 4h4v4" />
+      <path d="M18.8 13a8 8 0 1 1-2.1-8.6L19 8" />
+    </>
+  ),
+};
+
+function Icon({ name, className }: { name: IconName; className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={className ?? "icon"}
+      fill="none"
+      height="16"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+      width="16"
+    >
+      {iconPaths[name]}
+    </svg>
+  );
+}
 
 const statusLabels: Record<string, string> = {
   queued: "Queued",
@@ -38,8 +177,22 @@ const statusLabels: Record<string, string> = {
   failed: "Failed",
 };
 
-function wait(milliseconds: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timeoutId = window.setTimeout(resolve, milliseconds);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timeoutId);
+        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }
 
 function regionFor(block: TextBlock, pageNumber: number): BoundingRegion | undefined {
@@ -212,11 +365,19 @@ function displayLanguage(language: string) {
   return labels[language] ?? language;
 }
 
-function thumbnailZoom(page: PageResult) {
-  const widthInPdfPoints = page.page.unit.toLowerCase() === "inch"
-    ? page.page.width * 72
-    : page.page.width;
+function thumbnailZoom(dimensions: { width: number; unit: string }) {
+  const widthInPdfPoints = dimensions.unit.toLowerCase() === "inch"
+    ? dimensions.width * 72
+    : dimensions.width;
   return 78 / Math.max(widthInPdfPoints, 1);
+}
+
+interface RailItem {
+  pageNumber: number;
+  width: number;
+  height: number;
+  unit: string;
+  reviewRequired: boolean;
 }
 
 function DemoThumbnail({ page }: { page: PageResult }) {
@@ -676,9 +837,82 @@ function OverlayLayer({
   );
 }
 
+function DocumentListPanel({
+  open,
+  items,
+  loading,
+  error,
+  currentDocumentId,
+  onClose,
+  onOpen,
+  onDelete,
+}: {
+  open: boolean;
+  items: DocumentSummary[];
+  loading: boolean;
+  error: string | null;
+  currentDocumentId: string | null;
+  onClose: () => void;
+  onOpen: (documentId: string) => void;
+  onDelete: (item: DocumentSummary) => void;
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="doc-panel-overlay" onClick={onClose}>
+      <aside
+        aria-label="Recent documents"
+        className="doc-panel"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="doc-panel-heading">
+          <h2>Recent documents</h2>
+          <button aria-label="Close recent documents" onClick={onClose} type="button">
+            <Icon name="close" />
+          </button>
+        </div>
+        {loading ? <p className="doc-panel-status">Loading…</p> : null}
+        {error ? <p className="doc-panel-status is-error">{error}</p> : null}
+        {!loading && !error && !items.length ? (
+          <p className="doc-panel-status">No documents uploaded yet.</p>
+        ) : null}
+        <ul className="doc-panel-list">
+          {items.map((item) => (
+            <li className={item.id === currentDocumentId ? "is-current" : ""} key={item.id}>
+              <button
+                className="doc-panel-row"
+                onClick={() => onOpen(item.id)}
+                type="button"
+              >
+                <span className="doc-panel-name">{item.original_filename}</span>
+                <span className={"status-badge status-" + item.status}>
+                  <span className="status-dot" />
+                  {statusLabels[item.status] ?? item.status}
+                </span>
+                <span className="doc-panel-date">{new Date(item.updated_at).toLocaleString()}</span>
+              </button>
+              <button
+                aria-label={"Delete " + item.original_filename}
+                className="doc-panel-delete"
+                onClick={() => onDelete(item)}
+                type="button"
+              >
+                <Icon name="trash" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </aside>
+    </div>
+  );
+}
+
 export function DocumentStudio() {
   const [document, setDocument] = useState<DocumentDetail>(demoDocument);
   const [pages, setPages] = useState<PageResult[]>(demoPages);
+  const [pageSummaries, setPageSummaries] = useState<PageSummary[]>([]);
+  const [pageCache, setPageCache] = useState<Record<number, PageResult>>({});
+  const [pageLoadError, setPageLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [activeTab, setActiveTab] = useState<InspectorTab>("translated");
   const [selectedId, setSelectedId] = useState<string | null>(demoPages[0].blocks[0].block_id);
@@ -689,13 +923,39 @@ export function DocumentStudio() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [isDocumentListOpen, setIsDocumentListOpen] = useState(false);
+  const [documentList, setDocumentList] = useState<DocumentSummary[]>([]);
+  const [documentListLoading, setDocumentListLoading] = useState(false);
+  const [documentListError, setDocumentListError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const inspectorContentRef = useRef<HTMLDivElement>(null);
   const hoverScrollFrameRef = useRef<number | null>(null);
+  const activeRunRef = useRef<AbortController | null>(null);
 
-  const page = pages.find((item) => item.page.page_number === currentPage) ?? pages[0];
-  const pageCount = document.page_count ?? pages.length;
+  useEffect(() => {
+    return () => {
+      activeRunRef.current?.abort();
+    };
+  }, []);
+
+  // Pre-flight check: without this, a document only reveals that translation isn't
+  // configured after a full upload + extraction cycle. Best-effort - upload still works
+  // if this fails or is slow, it's just an early heads-up.
+  useEffect(() => {
+    if (!API_BASE) return;
+    const controller = new AbortController();
+    checkHealth({ signal: controller.signal })
+      .then((result) => setHealth(result))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, []);
+
+  const page = document.demo
+    ? pages.find((item) => item.page.page_number === currentPage) ?? pages[0]
+    : pageCache[currentPage];
+  const pageCount = document.page_count ?? (document.demo ? pages.length : pageSummaries.length);
   const realSource = !document.demo && API_BASE ? sourceUrl(document.id) : null;
   const canPreviewSource = Boolean(realSource && document.content_type === "application/pdf");
   const viewerPageCount = pageCount || (canPreviewSource ? 1 : 0);
@@ -735,6 +995,71 @@ export function DocumentStudio() {
     }
     return null;
   }, [page, selectedId]);
+
+  // Unified shape for the thumbnail rail. Demo pages are fully preloaded (only 3
+  // pages); real documents use the lightweight per-page summary so the rail renders
+  // instantly on a 70+ page document instead of waiting on every page's full content.
+  const railItems: RailItem[] = useMemo(
+    () =>
+      document.demo
+        ? pages.map((item) => ({
+            pageNumber: item.page.page_number,
+            width: item.page.width,
+            height: item.page.height,
+            unit: item.page.unit,
+            reviewRequired: item.warnings.length > 0,
+          }))
+        : pageSummaries.map((item) => ({
+            pageNumber: item.page_number,
+            width: item.width,
+            height: item.height,
+            unit: item.unit,
+            reviewRequired: item.review_required,
+          })),
+    [document.demo, pages, pageSummaries],
+  );
+  const flaggedPageNumbers = useMemo(
+    () => railItems.filter((item) => item.reviewRequired).map((item) => item.pageNumber),
+    [railItems],
+  );
+
+  // Fetch the currently viewed page's full content on demand. The thumbnail rail and
+  // the source PDF preview never depend on this - only the inspector/overlay panels do
+  // - so navigating a 70-page document stays instant even while this is in flight.
+  useEffect(() => {
+    if (document.demo || !document.id || pageCache[currentPage]) return;
+    const controller = new AbortController();
+    const documentId = document.id;
+    const pageNumber = currentPage;
+    getPage(documentId, pageNumber, { signal: controller.signal })
+      .then((loaded) => {
+        setPageCache((previous) => ({ ...previous, [pageNumber]: loaded }));
+        setSelectedId(standaloneBlocksForPage(loaded)[0]?.block_id ?? null);
+        setPageLoadError(null);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        setPageLoadError(caught instanceof Error ? caught.message : "This page could not be loaded.");
+      });
+    return () => controller.abort();
+  }, [document.demo, document.id, currentPage, pageCache]);
+
+  // Quietly prefetch the next page so "Next" feels instant most of the time, without
+  // ever eagerly loading the whole document up front. Best-effort: a prefetch failure
+  // is silently dropped, since the effect above will retry (and surface a real error)
+  // once the user actually navigates there.
+  useEffect(() => {
+    if (document.demo || !document.id) return;
+    const nextPageNumber = currentPage + 1;
+    if (nextPageNumber > pageCount || pageCache[nextPageNumber]) return;
+    const controller = new AbortController();
+    getPage(document.id, nextPageNumber, { signal: controller.signal })
+      .then((loaded) => {
+        setPageCache((previous) => ({ ...previous, [nextPageNumber]: loaded }));
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [document.demo, document.id, currentPage, pageCount, pageCache]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -822,33 +1147,56 @@ export function DocumentStudio() {
 
   const selectPage = useCallback((number: number) => {
     setCurrentPage(number);
-    const target = pages.find((item) => item.page.page_number === number);
-    setSelectedId(target ? standaloneBlocksForPage(target)[0]?.block_id ?? null : null);
-  }, [pages]);
+    if (document.demo) {
+      const target = pages.find((item) => item.page.page_number === number);
+      setSelectedId(target ? standaloneBlocksForPage(target)[0]?.block_id ?? null : null);
+      return;
+    }
+    const cached = pageCache[number];
+    // If not cached, leave selectedId null - the load-effect above resolves it once
+    // the page's content arrives, instead of blocking navigation on the fetch.
+    setSelectedId(cached ? standaloneBlocksForPage(cached)[0]?.block_id ?? null : null);
+  }, [document.demo, pages, pageCache]);
 
-  async function loadPages(nextDocument: DocumentDetail) {
-    const count = nextDocument.page_count ?? 0;
-    if (!count) return [];
-    const loaded = await Promise.all(
-      Array.from({ length: count }, (_, index) => getPage(nextDocument.id, index + 1)),
-    );
-    setPages(loaded);
-    setCurrentPage(1);
-    setSelectedId(loaded[0] ? standaloneBlocksForPage(loaded[0])[0]?.block_id ?? null : null);
-    return loaded;
+  function jumpToNextFlagged() {
+    if (!flaggedPageNumbers.length) return;
+    const next = flaggedPageNumbers.find((number) => number > currentPage) ?? flaggedPageNumbers[0];
+    selectPage(next);
   }
 
-  async function followJob(documentId: string) {
-    let latest = await getDocument(documentId);
+  function resetPageState() {
+    setPageSummaries([]);
+    setPageCache({});
+    setPageLoadError(null);
+    setCurrentPage(1);
+    setSelectedId(null);
+    setSourceViewport(null);
+  }
+
+  async function loadPageSummaries(nextDocument: DocumentDetail, signal?: AbortSignal) {
+    const count = nextDocument.page_count ?? 0;
+    if (!count) return;
+    const summaries = await listPageSummaries(nextDocument.id, { signal });
+    if (signal?.aborted) return;
+    setPageSummaries(summaries);
+    setPageCache({});
+    setCurrentPage(1);
+  }
+
+  async function followJob(documentId: string, signal: AbortSignal) {
+    let latest = await getDocument(documentId, { signal });
+    if (signal.aborted) return;
     setDocument(latest);
     for (let attempt = 0; attempt < 240 && !isTerminal(latest.status); attempt += 1) {
-      await wait(1500);
-      latest = await getDocument(documentId);
+      await wait(1500, signal);
+      latest = await getDocument(documentId, { signal });
+      if (signal.aborted) return;
       setDocument(latest);
     }
     if ((latest.page_count ?? 0) > 0) {
-      await loadPages(latest);
+      await loadPageSummaries(latest, signal);
     }
+    if (signal.aborted) return;
     if (latest.status === "failed") {
       throw new Error(latest.safe_error_message ?? "Document processing failed.");
     }
@@ -858,14 +1206,22 @@ export function DocumentStudio() {
   }
 
   async function processFile(file: File) {
+    // Also guards drag-and-drop, which isn't covered by the upload button's
+    // `disabled={busy}` - without this, dropping a second file mid-upload starts a
+    // second poll loop that interleaves state updates with the first.
+    if (busy) return;
     setError(null);
     if (!API_BASE) {
       setError("Backend not connected. Copy .env.local.example to .env.local and run the Python API before uploading.");
       return;
     }
+    activeRunRef.current?.abort();
+    const controller = new AbortController();
+    activeRunRef.current = controller;
     setBusy(true);
     try {
-      const created = await uploadDocument(file);
+      const created = await uploadDocument(file, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setDocument({
         id: created.document_id,
         original_filename: file.name,
@@ -878,15 +1234,85 @@ export function DocumentStudio() {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       });
-      setPages([]);
-      setCurrentPage(1);
-      setSelectedId(null);
-      setSourceViewport(null);
-      await followJob(created.document_id);
+      resetPageState();
+      await followJob(created.document_id, controller.signal);
     } catch (caught) {
+      if (controller.signal.aborted) return;
       setError(caught instanceof Error ? caught.message : "The document could not be processed.");
     } finally {
-      setBusy(false);
+      if (activeRunRef.current === controller) {
+        activeRunRef.current = null;
+        setBusy(false);
+      }
+    }
+  }
+
+  function handleCancel() {
+    activeRunRef.current?.abort();
+    setError("Cancelled.");
+  }
+
+  async function openDocument(documentId: string) {
+    if (busy) return;
+    setIsDocumentListOpen(false);
+    setError(null);
+    activeRunRef.current?.abort();
+    const controller = new AbortController();
+    activeRunRef.current = controller;
+    setBusy(true);
+    try {
+      const detail = await getDocument(documentId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      setDocument(detail);
+      resetPageState();
+      if (!isTerminal(detail.status)) {
+        await followJob(documentId, controller.signal);
+      } else if ((detail.page_count ?? 0) > 0) {
+        await loadPageSummaries(detail, controller.signal);
+      }
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setError(caught instanceof Error ? caught.message : "The document could not be opened.");
+    } finally {
+      if (activeRunRef.current === controller) {
+        activeRunRef.current = null;
+        setBusy(false);
+      }
+    }
+  }
+
+  async function openDocumentListPanel() {
+    setIsDocumentListOpen(true);
+    if (!API_BASE) return;
+    setDocumentListLoading(true);
+    setDocumentListError(null);
+    try {
+      const response = await listDocuments(1, 50);
+      setDocumentList(response.items);
+    } catch (caught) {
+      setDocumentListError(caught instanceof Error ? caught.message : "Documents could not be loaded.");
+    } finally {
+      setDocumentListLoading(false);
+    }
+  }
+
+  async function handleDeleteDocument(item: DocumentSummary) {
+    if (!window.confirm(`Delete "${item.original_filename}"? This cannot be undone.`)) return;
+    try {
+      await deleteDocument(item.id);
+      setDocumentList((items) => items.filter((candidate) => candidate.id !== item.id));
+      if (document.id === item.id) {
+        activeRunRef.current?.abort();
+        setDocument(demoDocument);
+        setPages(demoPages);
+        setPageSummaries([]);
+        setPageCache({});
+        setPageLoadError(null);
+        setCurrentPage(1);
+        setSelectedId(demoPages[0].blocks[0].block_id);
+      }
+    } catch (caught) {
+      setDocumentListError(caught instanceof Error ? caught.message : "The document could not be deleted.");
     }
   }
 
@@ -898,21 +1324,33 @@ export function DocumentStudio() {
 
   function handleDrop(event: DragEvent<HTMLElement>) {
     event.preventDefault();
+    if (busy) return;
     const file = event.dataTransfer.files?.[0];
     if (file) void processFile(file);
   }
 
   async function handleRetry() {
-    if (document.demo) return;
+    if (document.demo || busy) return;
+    activeRunRef.current?.abort();
+    const controller = new AbortController();
+    activeRunRef.current = controller;
     setBusy(true);
     setError(null);
     try {
-      await retryDocument(document.id);
-      await followJob(document.id);
+      await retryDocument(document.id, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      setPageSummaries([]);
+      setPageCache({});
+      setPageLoadError(null);
+      await followJob(document.id, controller.signal);
     } catch (caught) {
+      if (controller.signal.aborted) return;
       setError(caught instanceof Error ? caught.message : "Retry failed.");
     } finally {
-      setBusy(false);
+      if (activeRunRef.current === controller) {
+        activeRunRef.current = null;
+        setBusy(false);
+      }
     }
   }
 
@@ -939,6 +1377,20 @@ export function DocumentStudio() {
         ),
       ]))
     : [];
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
+      if (event.key === "ArrowRight" && currentPage < viewerPageCount) {
+        selectPage(currentPage + 1);
+      } else if (event.key === "ArrowLeft" && currentPage > 1) {
+        selectPage(currentPage - 1);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [currentPage, viewerPageCount, selectPage]);
 
   return (
     <main className="studio-shell" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
@@ -976,11 +1428,28 @@ export function DocumentStudio() {
         </div>
         <div className="header-actions">
           <span className="secure-workspace"><i aria-hidden="true" /> Secure workspace</span>
+          <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
+            <Icon name="folder" /> Recent
+          </button>
+          {busy ? (
+            <button className="secondary-button" onClick={handleCancel}><Icon name="close" /> Cancel</button>
+          ) : null}
           <button className="primary-button" disabled={busy} onClick={() => inputRef.current?.click()}>
-            <span className="button-icon" aria-hidden="true">＋</span> Upload document
+            <span className="button-icon" aria-hidden="true"><Icon name="plus" /></span> Upload document
           </button>
         </div>
       </header>
+
+      <DocumentListPanel
+        currentDocumentId={document.demo ? null : document.id}
+        error={documentListError}
+        items={documentList}
+        loading={documentListLoading}
+        onClose={() => setIsDocumentListOpen(false)}
+        onDelete={(item) => void handleDeleteDocument(item)}
+        onOpen={(documentId) => void openDocument(documentId)}
+        open={isDocumentListOpen}
+      />
 
       <section className="document-header">
         <div className="filename-group">
@@ -1002,11 +1471,11 @@ export function DocumentStudio() {
           </div>
         </div>
         <div className="document-actions">
-          {document.status === "failed" ? (
-            <button className="secondary-button" disabled={busy} onClick={handleRetry}>↻ Retry</button>
+          {!document.demo && (document.status === "failed" || document.status === "needs_review") ? (
+            <button className="secondary-button" disabled={busy} onClick={handleRetry}><Icon name="refresh" /> Retry</button>
           ) : null}
-          <button className="secondary-button" disabled={!page} onClick={() => handleDownload("page")}>↓ Page JSON</button>
-          <button className="secondary-button export-button" disabled={!page} onClick={() => handleDownload("bilingual")}>↓ Full export</button>
+          <button className="secondary-button" disabled={!page} onClick={() => handleDownload("page")}><Icon name="download" /> Page JSON</button>
+          <button className="secondary-button export-button" disabled={!page} onClick={() => handleDownload("bilingual")}><Icon name="download" /> Full export</button>
         </div>
       </section>
 
@@ -1014,7 +1483,23 @@ export function DocumentStudio() {
         <div className="notice-bar">
           <span className="notice-icon">i</span>
           <span className="notice-copy"><strong>Interactive preview</strong><span>Explore extraction, page-level translation, structured tables, and JSON review.</span></span>
-          <button onClick={() => inputRef.current?.click()}>Connect a document</button>
+        </div>
+      ) : null}
+
+      {!document.demo && health && (!health.azure_configured.document_intelligence || !health.azure_configured.openai) ? (
+        <div className="notice-bar" role="status">
+          <span className="notice-icon">!</span>
+          <span className="notice-copy">
+            <strong>Service not fully configured</strong>
+            <span>
+              {!health.azure_configured.document_intelligence
+                ? "Document extraction is not configured. "
+                : ""}
+              {!health.azure_configured.openai
+                ? "Translation is not configured - documents will extract but fail at the translation step."
+                : ""}
+            </span>
+          </span>
         </div>
       ) : null}
 
@@ -1035,40 +1520,53 @@ export function DocumentStudio() {
         <aside className="thumbnail-rail" aria-label="Document pages">
           <div className="rail-heading">
             <span>Document pages</span>
-            <span>{pageCount || 0}</span>
+            {flaggedPageNumbers.length ? (
+              <button
+                className="rail-flag-jump"
+                onClick={jumpToNextFlagged}
+                title="Jump to next page needing review"
+                type="button"
+              >
+                <Icon name="flag" /> {flaggedPageNumbers.length}
+              </button>
+            ) : (
+              <span>{pageCount || 0}</span>
+            )}
           </div>
           <div className="thumbnail-scroll">
-            {pages.map((item) => (
+            {railItems.map((item) => (
               <button
-                aria-current={currentPage === item.page.page_number ? "page" : undefined}
+                aria-current={currentPage === item.pageNumber ? "page" : undefined}
                 className="page-thumbnail"
-                key={item.page.page_number}
-                onClick={() => selectPage(item.page.page_number)}
+                key={item.pageNumber}
+                onClick={() => selectPage(item.pageNumber)}
               >
                 <span
                   className={"thumbnail-paper " + (!document.demo ? "is-pdf" : "")}
                   style={!document.demo ? {
-                    aspectRatio: `${item.page.width} / ${item.page.height}`,
+                    aspectRatio: `${item.width} / ${item.height}`,
                     height: "auto",
                   } : undefined}
                 >
                   {document.demo ? (
-                    <DemoThumbnail page={item} />
+                    <DemoThumbnail
+                      page={pages.find((candidate) => candidate.page.page_number === item.pageNumber)!}
+                    />
                   ) : realSource ? (
                     <PdfPage
                       compact
-                      pageNumber={item.page.page_number}
+                      pageNumber={item.pageNumber}
                       rotation={0}
                       src={realSource}
                       zoom={thumbnailZoom(item)}
                     />
                   ) : null}
                 </span>
-                <span>Page {item.page.page_number}</span>
-                {item.warnings.length ? <span className="thumb-warning" title="Review suggested">!</span> : null}
+                <span>Page {item.pageNumber}</span>
+                {item.reviewRequired ? <span className="thumb-warning" title="Review suggested">!</span> : null}
               </button>
             ))}
-            {!pages.length ? <div className="rail-empty">Pages appear after extraction.</div> : null}
+            {!railItems.length ? <div className="rail-empty">Pages appear after extraction.</div> : null}
           </div>
         </aside>
 
@@ -1081,7 +1579,7 @@ export function DocumentStudio() {
                 disabled={currentPage <= 1}
                 onClick={() => selectPage(currentPage - 1)}
               >
-                &larr; Prev
+                <Icon name="arrowLeft" /> Prev
               </button>
               <span className="page-counter">Page <strong>{currentPage}</strong> of {viewerPageCount}</span>
               <button
@@ -1090,7 +1588,7 @@ export function DocumentStudio() {
                 disabled={currentPage >= viewerPageCount || !page}
                 onClick={() => selectPage(currentPage + 1)}
               >
-                Next &rarr;
+                Next <Icon name="arrowRight" />
               </button>
             </div>
             <div className="toolbar-group">
@@ -1099,7 +1597,7 @@ export function DocumentStudio() {
                 disabled={zoom <= 0.5}
                 onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}
               >
-                &minus;
+                <Icon name="minus" />
               </button>
               <span className="zoom-value">{Math.round(zoom * 100)}%</span>
               <button
@@ -1107,14 +1605,14 @@ export function DocumentStudio() {
                 disabled={zoom >= 1.5}
                 onClick={() => setZoom((value) => Math.min(1.5, value + 0.1))}
               >
-                +
+                <Icon name="plus" />
               </button>
               <span className="toolbar-divider" />
               <button className="toolbar-text-button" onClick={() => fitViewer("width")}>Fit width</button>
               <button className="toolbar-text-button" onClick={() => fitViewer("page")}>Fit page</button>
               <span className="toolbar-divider" />
-              <button aria-label="Rotate page left" onClick={() => setRotation((value) => (value + 270) % 360)}>&#10226;</button>
-              <button aria-label="Rotate page right" onClick={() => setRotation((value) => (value + 90) % 360)}>&#10227;</button>
+              <button aria-label="Rotate page left" onClick={() => setRotation((value) => (value + 270) % 360)}><Icon name="rotateLeft" /></button>
+              <button aria-label="Rotate page right" onClick={() => setRotation((value) => (value + 90) % 360)}><Icon name="rotateRight" /></button>
               <button className="toolbar-text-button" disabled={viewIsDefault} onClick={resetViewer}>Reset</button>
               <span className="toolbar-divider" />
               <button
@@ -1169,7 +1667,7 @@ export function DocumentStudio() {
               </div>
             ) : (
               <div className="empty-viewer">
-                <span className="empty-upload-icon">↑</span>
+                <span className="empty-upload-icon"><Icon name="arrowUp" /></span>
                 <h2>{busy ? "Processing your document" : "Upload a document to begin"}</h2>
                 <p>PDF, PNG, JPEG, TIFF, or BMP · Arabic and Mandarin supported</p>
               </div>
@@ -1196,12 +1694,12 @@ export function DocumentStudio() {
                 </span>
               </div>
             </div>
-            <button aria-label="Copy page JSON" disabled={!page} onClick={() => page && navigator.clipboard.writeText(JSON.stringify(page, null, 2))}>▣</button>
+            <button aria-label="Copy page JSON" disabled={!page} onClick={() => page && navigator.clipboard.writeText(JSON.stringify(page, null, 2))}><Icon name="copy" /></button>
           </div>
           <div className="language-summary">
             <span className="language-summary-label">Translation route</span>
             <strong className="language-token">{sourceLanguages.join(" + ") || "—"}</strong>
-            <span className="language-arrow">→</span>
+            <span className="language-arrow"><Icon name="arrowRight" /></span>
             <strong className="language-token is-target">English</strong>
           </div>
           <div className="tab-list" role="tablist" aria-label="Page results">
@@ -1223,6 +1721,20 @@ export function DocumentStudio() {
               <div className="translation-status-message" role="status">
                 <strong>{page ? "Translation unavailable" : "Extraction unavailable"}</strong>
                 <span>{document.safe_error_message}</span>
+              </div>
+            ) : null}
+
+            {!document.demo && !page && !pageLoadError && document.page_count ? (
+              <div className="page-loading-message" role="status">
+                <strong>Loading page {currentPage}…</strong>
+                <span>Fetching extracted and translated content for this page.</span>
+              </div>
+            ) : null}
+
+            {!document.demo && pageLoadError ? (
+              <div className="translation-status-message" role="alert">
+                <strong>Page {currentPage} could not be loaded</strong>
+                <span>{pageLoadError}</span>
               </div>
             ) : null}
 
@@ -1255,7 +1767,7 @@ export function DocumentStudio() {
                           key={table.table_id}
                         >
                           <div className="table-result-heading">
-                            <span>▦ Table {tableIndex + 1}</span>
+                            <span><Icon name="table" /> Table {tableIndex + 1}</span>
                             <span>{table.row_count} rows × {table.column_count} columns</span>
                           </div>
                           <div
@@ -1288,7 +1800,7 @@ export function DocumentStudio() {
                                   type="button"
                                 >
                                   <span>{activeTab === "translated" ? cell.translated_content || "Translation pending" : cell.content}</span>
-                                  {activeTab === "translated" && cell.translated_content ? (
+                                  {activeTab === "translated" ? (
                                     <small dir={cell.source_language === "ar" ? "rtl" : "ltr"}>{cell.content}</small>
                                   ) : null}
                                 </button>

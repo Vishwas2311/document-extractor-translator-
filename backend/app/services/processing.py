@@ -4,7 +4,12 @@ from datetime import UTC, datetime
 import structlog
 
 from app.core.enums import DocumentStatus, JobStatus, TranslationStatus
-from app.core.exceptions import AppError
+from app.core.exceptions import (
+    AppError,
+    AzureServiceError,
+    JobLeaseLostError,
+    TranslationValidationError,
+)
 from app.integrations.azure_openai.translator import AzureOpenAITranslator
 from app.integrations.document_intelligence.client import DocumentIntelligenceAnalyzer
 from app.integrations.document_intelligence.mapper import DocumentIntelligenceMapper
@@ -39,6 +44,8 @@ class ProcessingService:
         max_batch_blocks: int,
         max_batch_chars: int,
         ocr_review_threshold: float,
+        worker_id: str,
+        job_lease_seconds: int,
     ) -> None:
         self.repository = repository
         self.storage = storage
@@ -51,8 +58,12 @@ class ProcessingService:
         self.max_batch_blocks = max_batch_blocks
         self.max_batch_chars = max_batch_chars
         self.ocr_review_threshold = ocr_review_threshold
+        self.worker_id = worker_id
+        self.job_lease_seconds = job_lease_seconds
 
-    async def _stage(self, document_id: str, status: DocumentStatus, progress: int) -> None:
+    async def _stage(
+        self, document_id: str, job_id: str, status: DocumentStatus, progress: int
+    ) -> None:
         await self.repository.update_document(
             document_id,
             status=status.value,
@@ -61,6 +72,20 @@ class ProcessingService:
             error_code=None,
             safe_error_message=None,
         )
+        renewed = await self.repository.renew_lease(job_id, self.worker_id, self.job_lease_seconds)
+        if not renewed:
+            raise JobLeaseLostError(
+                "This worker's job lease expired and was reclaimed by another worker."
+            )
+
+    async def _mark_pages_failed(self, document_id: str, page_numbers: list[int]) -> None:
+        for number in page_numbers:
+            relative = f"pages/page-{number:04d}.json"
+            if not self.storage.exists(document_id, relative):
+                continue
+            payload = await self.storage.read_json(document_id, relative)
+            payload["document_status"] = DocumentStatus.FAILED.value
+            await self.storage.write_json(document_id, relative, payload)
 
     def _batches(self, blocks: list[TextBlock]) -> list[list[TextBlock]]:
         batches: list[list[TextBlock]] = []
@@ -79,6 +104,33 @@ class ProcessingService:
         if current:
             batches.append(current)
         return batches
+
+    async def _resolve_batch_translation(
+        self,
+        document_id: str,
+        artifact: str,
+        input_hash: str,
+        request: TranslationBatchRequest,
+        inputs: list[TranslationInput],
+    ) -> TranslationBatchResponse:
+        if self.storage.exists(document_id, artifact):
+            cached = await self.storage.read_json(document_id, artifact)
+            if cached.get("input_hash") == input_hash:
+                response = TranslationBatchResponse.model_validate(cached["response"])
+                self.validator.validate(inputs, response)
+                return response
+        response = await self.translator.translate(request)
+        self.validator.validate(inputs, response)
+        await self.storage.write_json(
+            document_id,
+            artifact,
+            {
+                "input_hash": input_hash,
+                "prompt_version": TRANSLATION_PROMPT_VERSION,
+                "response": response.model_dump(mode="json"),
+            },
+        )
+        return response
 
     async def _translate(self, document: CanonicalDocument) -> bool:
         review_required = False
@@ -115,7 +167,11 @@ class ProcessingService:
             if self.language_service.should_translate(block.source_language):
                 block.translation_status = TranslationStatus.PENDING
                 translatable.append(block)
-            elif block.source_language == "en":
+            elif block.source_language == "en" or not self.language_service.has_letters(
+                block.source_text
+            ):
+                # No alphabetic content (page numbers, dates, IDs, bare punctuation) - there
+                # is no language here to translate, regardless of what detect() returned.
                 block.translated_text = block.source_text
                 block.translation_status = TranslationStatus.NOT_REQUIRED
             else:
@@ -137,26 +193,32 @@ class ProcessingService:
             hash_input = f"{TRANSLATION_PROMPT_VERSION}\n{request.model_dump_json()}"
             input_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
             artifact = f"translations/batch-{batch_index:04d}.json"
-            response: TranslationBatchResponse
-            if self.storage.exists(document.document_id, artifact):
-                cached = await self.storage.read_json(document.document_id, artifact)
-                if cached.get("input_hash") == input_hash:
-                    response = TranslationBatchResponse.model_validate(cached["response"])
-                    self.validator.validate(inputs, response)
-                else:
-                    response = await self.translator.translate(request)
-            else:
-                response = await self.translator.translate(request)
-            self.validator.validate(inputs, response)
-            await self.storage.write_json(
-                document.document_id,
-                artifact,
-                {
-                    "input_hash": input_hash,
-                    "prompt_version": TRANSLATION_PROMPT_VERSION,
-                    "response": response.model_dump(mode="json"),
-                },
-            )
+            try:
+                response = await self._resolve_batch_translation(
+                    document.document_id, artifact, input_hash, request, inputs
+                )
+            except (AzureServiceError, TranslationValidationError) as exc:
+                # Isolate the failure to just this batch's blocks instead of failing the
+                # whole document - the rest of the document may translate fine.
+                failure_status = (
+                    TranslationStatus.FILTERED
+                    if isinstance(exc, AzureServiceError)
+                    and exc.details.get("reason") == "refusal"
+                    else TranslationStatus.FAILED
+                )
+                for block in blocks:
+                    block.translation_status = failure_status
+                    block.review_required = True
+                    block.warnings.append(f"Translation failed: {exc.message}")
+                review_required = True
+                await logger.awarning(
+                    "translation_batch_failed",
+                    document_id=document.document_id,
+                    batch_index=batch_index,
+                    error_code=exc.code,
+                    block_status=failure_status.value,
+                )
+                continue
             translated_by_id = {
                 item.block_id: item.translated_text for item in response.translations
             }
@@ -178,14 +240,21 @@ class ProcessingService:
     async def process(self, document_id: str) -> None:
         document_record = await self.repository.get(document_id)
         job = await self.repository.latest_job(document_id)
-        await self.repository.update_job(
-            job.id,
-            status=JobStatus.RUNNING.value,
-            started_at=datetime.now(UTC),
-            heartbeat_at=datetime.now(UTC),
-        )
+        claimed = await self.repository.claim_job(job.id, self.worker_id, self.job_lease_seconds)
+        if not claimed:
+            # Another worker already owns this job's lease - nothing to do here. This is
+            # the normal outcome when two replicas race to pick up the same queued job.
+            await logger.ainfo(
+                "job_claim_skipped",
+                document_id=document_id,
+                job_id=job.id,
+                worker_id=self.worker_id,
+            )
+            return
+
+        page_numbers: list[int] = []
         try:
-            await self._stage(document_id, DocumentStatus.EXTRACTING, 15)
+            await self._stage(document_id, job.id, DocumentStatus.EXTRACTING, 15)
             raw_path = "raw/document_intelligence.json"
             if self.storage.exists(document_id, raw_path):
                 raw = await self.storage.read_json(document_id, raw_path)
@@ -195,7 +264,7 @@ class ProcessingService:
                 )
                 await self.storage.write_json(document_id, raw_path, raw)
 
-            await self._stage(document_id, DocumentStatus.NORMALIZING, 35)
+            await self._stage(document_id, job.id, DocumentStatus.NORMALIZING, 35)
             canonical = self.mapper.map(
                 raw,
                 document_id=document_id,
@@ -224,6 +293,7 @@ class ProcessingService:
                 canonical,
                 DocumentStatus.NORMALIZING.value,
             )
+            page_numbers = [page.page.page_number for page in extracted_pages]
             for page in extracted_pages:
                 await self.storage.write_json(
                     document_id,
@@ -236,16 +306,17 @@ class ProcessingService:
                 source_languages=canonical.source_languages,
             )
 
-            await self._stage(document_id, DocumentStatus.TRANSLATING, 55)
+            await self._stage(document_id, job.id, DocumentStatus.TRANSLATING, 55)
             review_required = await self._translate(canonical)
-            await self._stage(document_id, DocumentStatus.VALIDATING, 80)
+            await self._stage(document_id, job.id, DocumentStatus.VALIDATING, 80)
             final_status = (
                 DocumentStatus.NEEDS_REVIEW if review_required else DocumentStatus.COMPLETED
             )
             canonical.status = final_status.value
 
-            await self._stage(document_id, DocumentStatus.EXPORTING, 90)
+            await self._stage(document_id, job.id, DocumentStatus.EXPORTING, 90)
             page_results = self.exporter.page_results(canonical, final_status.value)
+            page_numbers = [page.page.page_number for page in page_results]
             for page in page_results:
                 await self.storage.write_json(
                     document_id,
@@ -277,36 +348,55 @@ class ProcessingService:
                     ],
                 },
             )
-            await self.repository.update_document(
+            await self.repository.finish_processing(
                 document_id,
-                status=final_status.value,
-                current_stage=final_status.value,
-                progress_percent=100,
-                page_count=len(page_results),
-                source_languages=canonical.source_languages,
-                completed_at=datetime.now(UTC),
-            )
-            await self.repository.update_job(
                 job.id,
-                status=JobStatus.COMPLETED.value,
-                stage="completed",
-                completed_at=datetime.now(UTC),
+                document_values={
+                    "status": final_status.value,
+                    "current_stage": final_status.value,
+                    "progress_percent": 100,
+                    "page_count": len(page_results),
+                    "source_languages": canonical.source_languages,
+                    "completed_at": datetime.now(UTC),
+                },
+                job_values={
+                    "status": JobStatus.COMPLETED.value,
+                    "stage": "completed",
+                    "completed_at": datetime.now(UTC),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
+            )
+        except JobLeaseLostError:
+            # Our lease expired and another worker has already reclaimed this job - it
+            # owns the terminal write now. Writing here would race with (and could
+            # clobber) whatever that worker records, so we abandon the run silently.
+            await logger.awarning(
+                "job_lease_lost_abandoning_run",
+                document_id=document_id,
+                job_id=job.id,
+                worker_id=self.worker_id,
             )
         except AppError as exc:
-            await self.repository.update_document(
+            await self.repository.finish_processing(
                 document_id,
-                status=DocumentStatus.FAILED.value,
-                current_stage=DocumentStatus.FAILED.value,
-                error_code=exc.code,
-                safe_error_message=exc.message,
-            )
-            await self.repository.update_job(
                 job.id,
-                status=JobStatus.FAILED.value,
-                error_code=exc.code,
-                safe_error_message=exc.message,
-                completed_at=datetime.now(UTC),
+                document_values={
+                    "status": DocumentStatus.FAILED.value,
+                    "current_stage": DocumentStatus.FAILED.value,
+                    "error_code": exc.code,
+                    "safe_error_message": exc.message,
+                },
+                job_values={
+                    "status": JobStatus.FAILED.value,
+                    "error_code": exc.code,
+                    "safe_error_message": exc.message,
+                    "completed_at": datetime.now(UTC),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
             )
+            await self._mark_pages_failed(document_id, page_numbers)
             await logger.awarning(
                 "document_processing_failed",
                 document_id=document_id,
@@ -314,20 +404,25 @@ class ProcessingService:
                 retryable=getattr(exc, "retryable", False),
             )
         except Exception:
-            await self.repository.update_document(
+            await self.repository.finish_processing(
                 document_id,
-                status=DocumentStatus.FAILED.value,
-                current_stage=DocumentStatus.FAILED.value,
-                error_code="processing_failed",
-                safe_error_message="Document processing failed unexpectedly.",
-            )
-            await self.repository.update_job(
                 job.id,
-                status=JobStatus.FAILED.value,
-                error_code="processing_failed",
-                safe_error_message="Document processing failed unexpectedly.",
-                completed_at=datetime.now(UTC),
+                document_values={
+                    "status": DocumentStatus.FAILED.value,
+                    "current_stage": DocumentStatus.FAILED.value,
+                    "error_code": "processing_failed",
+                    "safe_error_message": "Document processing failed unexpectedly.",
+                },
+                job_values={
+                    "status": JobStatus.FAILED.value,
+                    "error_code": "processing_failed",
+                    "safe_error_message": "Document processing failed unexpectedly.",
+                    "completed_at": datetime.now(UTC),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
             )
+            await self._mark_pages_failed(document_id, page_numbers)
             await logger.aexception(
                 "document_processing_failed_unexpectedly",
                 document_id=document_id,

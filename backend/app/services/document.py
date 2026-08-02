@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import aiofiles
+import structlog
 from fastapi import UploadFile
 
 from app.core.config import Settings
@@ -13,6 +14,8 @@ from app.models.document import Document
 from app.models.processing_job import ProcessingJob
 from app.repositories.documents import DocumentRepository
 from app.storage.local import LocalArtifactStorage
+
+logger = structlog.get_logger(__name__)
 
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
@@ -102,17 +105,24 @@ class DocumentService:
         return await self.repository.create(document, job)
 
     async def retry(self, document_id: str) -> ProcessingJob:
-        document = await self.repository.get(document_id)
-        if DocumentStatus(document.status) not in {
-            DocumentStatus.FAILED,
-            DocumentStatus.NEEDS_REVIEW,
-        }:
-            raise ConflictError("Only failed or reviewable documents can be retried.")
+        # The eligibility check and the queued transition happen atomically inside the
+        # repository so two concurrent retry requests can't both create a job (see
+        # DocumentRepository.create_retry_job).
         return await self.repository.create_retry_job(document_id)
 
     async def delete(self, document_id: str) -> None:
         document = await self.repository.get(document_id)
         if DocumentStatus(document.status) not in TERMINAL_DOCUMENT_STATUSES:
             raise ConflictError("A document cannot be deleted while it is processing.")
-        await self.storage.delete_document(document_id)
+        # Delete the DB row first: once it's gone, no client can reach a dangling
+        # reference to files that might not exist yet. Storage cleanup is best-effort
+        # after that - a failure here just leaves orphaned files for ops to clean up,
+        # instead of a document that 404s on lookup but 500s on read.
         await self.repository.delete(document_id)
+        try:
+            await self.storage.delete_document(document_id)
+        except OSError:
+            await logger.aexception(
+                "document_storage_cleanup_failed",
+                document_id=document_id,
+            )

@@ -94,6 +94,7 @@ async def list_pages(request: Request, document_id: str) -> list[PageSummary]:
                 angle=payload.page.angle,
                 block_count=len(payload.blocks),
                 table_count=len(payload.tables),
+                review_required=bool(payload.warnings),
             )
         )
     return summaries

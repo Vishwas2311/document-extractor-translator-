@@ -24,3 +24,19 @@ def test_only_supported_languages_are_translated() -> None:
     assert service.should_translate("zh-Hans")
     assert service.should_translate("mixed")
     assert not service.should_translate("en")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("3", False),
+        ("2024-01-15", False),
+        ("#42/10", False),
+        ("   ", False),
+        ("Page 3", True),
+        ("مرحبا", True),
+        ("青年", True),
+    ],
+)
+def test_has_letters_identifies_non_linguistic_content(text: str, expected: bool) -> None:
+    assert LanguageService.has_letters(text) is expected

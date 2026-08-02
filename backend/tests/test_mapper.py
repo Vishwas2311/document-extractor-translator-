@@ -1,4 +1,7 @@
-from app.integrations.document_intelligence.mapper import DocumentIntelligenceMapper
+from app.integrations.document_intelligence.mapper import (
+    DocumentIntelligenceMapper,
+    slice_utf16,
+)
 
 
 def test_maps_layout_response_to_page_aware_canonical_document() -> None:
@@ -44,6 +47,39 @@ def test_maps_layout_response_to_page_aware_canonical_document() -> None:
     assert [block.source_language for block in result.blocks] == ["ar", "zh-Hans"]
     assert result.blocks[0].ocr_confidence == 0.98
     assert result.blocks[1].bounding_regions[0].polygon[2].x == 4
+
+
+def test_page_text_uses_utf16_code_unit_offsets_for_non_bmp_content() -> None:
+    # "\U0001F600" is one Python character but a two-code-unit UTF-16 surrogate pair.
+    # Azure Document Intelligence span offsets are UTF-16 code-unit offsets, so a naive
+    # Python string slice misaligns for every span after a non-BMP character.
+    content = "\U0001F600nameTAIL"
+
+    # Sanity check the fixture actually exercises the misalignment this test targets.
+    assert content[2:6] != "name"
+
+    raw = {
+        "content": content,
+        "pages": [
+            {
+                "pageNumber": 1,
+                "width": 8.5,
+                "height": 11,
+                "unit": "inch",
+                # UTF-16 code units 2-5 ("name") - the emoji occupies units 0-1.
+                "spans": [{"offset": 2, "length": 4}],
+            }
+        ],
+    }
+
+    result = DocumentIntelligenceMapper().map(raw, document_id="doc-emoji", filename="intake.pdf")
+
+    assert result.pages[0].source_text == "name"
+
+
+def test_slice_utf16_matches_ascii_python_slicing() -> None:
+    content_utf16 = "hello world".encode("utf-16-le")
+    assert slice_utf16(content_utf16, 6, 5) == "world"
 
 
 def test_table_cell_paragraphs_are_not_duplicated_as_text_blocks() -> None:

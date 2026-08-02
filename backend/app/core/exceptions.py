@@ -34,6 +34,19 @@ class ConflictError(AppError):
     status_code = 409
 
 
+class JobNotFoundError(AppError):
+    code = "job_not_found"
+    status_code = 404
+
+
+class JobLeaseLostError(AppError):
+    """Raised when a worker's job lease was reclaimed (expired) by another worker."""
+
+    code = "job_lease_lost"
+    status_code = 409
+    retryable = True
+
+
 class AzureServiceError(AppError):
     code = "azure_service_error"
     status_code = 502

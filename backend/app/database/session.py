@@ -31,7 +31,7 @@ class Database:
 
     async def create_schema(self) -> None:
         from app.database.base import Base
-        from app.models import document, processing_job, translation_batch  # noqa: F401
+        from app.models import document, processing_job  # noqa: F401
 
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)

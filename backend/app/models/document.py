@@ -40,6 +40,3 @@ class Document(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     jobs = relationship("ProcessingJob", back_populates="document", cascade="all, delete-orphan")
-    translation_batches = relationship(
-        "TranslationBatch", back_populates="document", cascade="all, delete-orphan"
-    )

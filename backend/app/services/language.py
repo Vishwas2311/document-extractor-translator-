@@ -39,3 +39,12 @@ class LanguageService:
     @staticmethod
     def should_translate(language: str) -> bool:
         return language in {"ar", "zh-Hans", "zh-Hant", "zh", "mixed"}
+
+    @staticmethod
+    def has_letters(text: str) -> bool:
+        """True if text contains at least one alphabetic character in any script.
+
+        Text with none (page numbers, dates, IDs, punctuation-only OCR blocks) carries
+        no language to translate, regardless of what `detect()` returned for it.
+        """
+        return any(character.isalpha() for character in text)

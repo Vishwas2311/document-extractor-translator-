@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from uuid import uuid4
 
 from app.core.config import Settings
 from app.database.session import Database
@@ -56,6 +57,8 @@ async def create_container(settings: Settings) -> ServiceContainer:
         max_batch_blocks=settings.translation_max_blocks,
         max_batch_chars=settings.translation_max_input_chars,
         ocr_review_threshold=settings.ocr_review_threshold,
+        worker_id=f"worker-{uuid4().hex[:12]}",
+        job_lease_seconds=settings.job_lease_seconds,
     )
     runner = InProcessJobRunner(
         processing_service,

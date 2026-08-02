@@ -60,6 +60,20 @@ def regions(item: dict[str, Any]) -> list[BoundingRegion]:
     return output
 
 
+def slice_utf16(content_utf16: bytes, offset: int, length: int) -> str:
+    """Slice text by UTF-16 code-unit offset/length, as Azure Document Intelligence reports spans.
+
+    Document Intelligence span offsets are UTF-16 code-unit offsets, not Python (code-point)
+    string indices. Indexing the Python string directly misaligns - and silently corrupts -
+    everything after the first character outside the Basic Multilingual Plane (emoji, some
+    CJK extensions). `content_utf16` is the document content pre-encoded once as UTF-16LE
+    bytes; each UTF-16 code unit is 2 bytes, so offset/length are doubled to get byte bounds.
+    """
+    start = offset * 2
+    end = start + length * 2
+    return content_utf16[start:end].decode("utf-16-le")
+
+
 def overlaps(left: Span, right: Span) -> bool:
     return left.offset < right.offset + right.length and right.offset < left.offset + left.length
 
@@ -126,6 +140,7 @@ def confidence_for(block_spans: list[Span], raw_words: list[dict[str, Any]]) -> 
 class DocumentIntelligenceMapper:
     def map(self, raw: dict[str, Any], *, document_id: str, filename: str) -> CanonicalDocument:
         content = str(value(raw, "content", default=""))
+        content_utf16 = content.encode("utf-16-le")
         raw_pages = value(raw, "pages", default=[]) or []
         page_count = len(raw_pages)
         pages: list[PageMetadata] = []
@@ -133,7 +148,7 @@ class DocumentIntelligenceMapper:
         for page in raw_pages:
             page_spans = spans(page)
             page_text = "".join(
-                content[item.offset : item.offset + item.length] for item in page_spans
+                slice_utf16(content_utf16, item.offset, item.length) for item in page_spans
             )
             if not page_text:
                 page_text = "\n".join(

@@ -112,3 +112,47 @@ export interface DocumentCreateResponse {
   status: DocumentStatus;
   status_url: string;
 }
+
+export interface PageSummary {
+  page_number: number;
+  width: number;
+  height: number;
+  unit: string;
+  angle: number;
+  block_count: number;
+  table_count: number;
+  review_required: boolean;
+}
+
+export interface DocumentSummary {
+  id: string;
+  original_filename: string;
+  content_type: string;
+  file_size: number;
+  status: DocumentStatus;
+  current_stage: string;
+  progress_percent: number;
+  page_count?: number | null;
+  source_languages: string[];
+  target_language: string;
+  error_code?: string | null;
+  safe_error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string | null;
+}
+
+export interface DocumentListResponse {
+  items: DocumentSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface HealthStatus {
+  status: string;
+  azure_configured: {
+    document_intelligence: boolean;
+    openai: boolean;
+  };
+}
