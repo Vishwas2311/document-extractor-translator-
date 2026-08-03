@@ -14,13 +14,12 @@ import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
   checkHealth,
-  checkSession,
+  cancelDocument,
   deleteDocument,
   downloadArtifact,
   fetchSourceBlobUrl,
   getDocument,
   getPage,
-  hasApiAuthToken,
   isTerminal,
   listDocuments,
   listPageSummaries,
@@ -35,7 +34,6 @@ import type {
   HealthStatus,
   PageResult,
   PageSummary,
-  SessionStatus,
   TableCell,
   TableResult,
   TextBlock,
@@ -233,6 +231,7 @@ const statusLabels: Record<string, string> = {
   completed: "Completed",
   needs_review: "Review suggested",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
 function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -445,6 +444,92 @@ interface RailItem {
   height: number;
   unit: string;
   reviewRequired: boolean;
+  ready: boolean;
+}
+
+function progressLabel(document: DocumentDetail): string {
+  const stage = document.current_stage;
+  const percent = document.progress_percent;
+  const ready = document.pages_ready;
+  const total = document.page_count;
+  const batchesDone = document.translation_batches_done;
+  const batchesTotal = document.translation_batches_total;
+  if (document.status === "queued" && document.queue_position != null) {
+    return `Waiting in queue · position ${document.queue_position}` +
+      (document.worker_slots != null ? ` · ${document.active_jobs ?? 0}/${document.worker_slots} workers busy` : "") +
+      ` · ${percent}%`;
+  }
+  if (
+    (stage === "translating" || stage === "Translating") &&
+    batchesTotal != null &&
+    batchesTotal > 0
+  ) {
+    return `${stage} · batch ${batchesDone ?? 0}/${batchesTotal} · ${percent}%`;
+  }
+  if (total && ready != null && ready >= 0 && (stage === "extracting" || stage === "normalizing" || stage === "Extracting" || stage === "Normalizing")) {
+    return `${stage} · pages ${ready}/${total} · ${percent}%`;
+  }
+  if (ready != null && total && ready < total && !isTerminal(document.status)) {
+    return `${stage} · pages ready ${ready}/${total} · ${percent}%`;
+  }
+  return `${stage} · ${percent}%`;
+}
+
+function VirtualPdfThumb(props: {
+  authSrc: string;
+  pageNumber: number;
+  rotation: number;
+  src: string;
+  zoom: number;
+  width: number;
+  height: number;
+  unit: string;
+}) {
+  const hostRef = useRef<HTMLSpanElement>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const root = host.closest(".thumbnail-scroll");
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        setVisible(Boolean(entry?.isIntersecting));
+      },
+      {
+        root: root instanceof Element ? root : null,
+        rootMargin: "160px 0px",
+        threshold: 0.01,
+      },
+    );
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <span
+      className="thumbnail-paper is-pdf"
+      ref={hostRef}
+      style={{
+        aspectRatio: `${props.width} / ${props.height}`,
+        height: "auto",
+      }}
+    >
+      {visible ? (
+        <PdfPage
+          authSrc={props.authSrc}
+          compact
+          pageNumber={props.pageNumber}
+          rotation={props.rotation}
+          src={props.src}
+          zoom={props.zoom}
+        />
+      ) : (
+        <span className="thumb-placeholder" aria-hidden="true" />
+      )}
+    </span>
+  );
 }
 
 function DemoThumbnail({ page }: { page: PageResult }) {
@@ -994,19 +1079,109 @@ export function DocumentStudio() {
   const [overlays, setOverlays] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [session, setSession] = useState<SessionStatus | null>(null);
   const [sourceBlobUrl, setSourceBlobUrl] = useState<string | null>(null);
   const [isDocumentListOpen, setIsDocumentListOpen] = useState(false);
   const [documentList, setDocumentList] = useState<DocumentSummary[]>([]);
   const [documentListLoading, setDocumentListLoading] = useState(false);
   const [documentListError, setDocumentListError] = useState<string | null>(null);
+  const [inspectorWidth, setInspectorWidth] = useState<number | null>(null);
+  const [isResizingPanels, setIsResizingPanels] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const inspectorContentRef = useRef<HTMLDivElement>(null);
+  const studioBodyRef = useRef<HTMLDivElement>(null);
   const hoverScrollFrameRef = useRef<number | null>(null);
   const activeRunRef = useRef<AbortController | null>(null);
+
+  const measuredInspectorWidth = useCallback(() => {
+    if (inspectorWidth !== null) return inspectorWidth;
+    const panel = studioBodyRef.current?.querySelector<HTMLElement>(".inspector-panel");
+    return panel?.getBoundingClientRect().width ?? 460;
+  }, [inspectorWidth]);
+
+  const MIN_INSPECTOR_WIDTH = 340;
+  const MIN_MAIN_WIDTH = 360;
+
+  const handleResizerPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const container = studioBodyRef.current;
+      if (!container) return;
+      event.preventDefault();
+      const containerWidth = container.getBoundingClientRect().width;
+      const startX = event.clientX;
+      const startWidth = measuredInspectorWidth();
+      const handle = event.currentTarget;
+      const pointerId = event.pointerId;
+      handle.setPointerCapture(pointerId);
+      setIsResizingPanels(true);
+
+      const endResize = () => {
+        setIsResizingPanels(false);
+        window.removeEventListener("pointermove", handleMove);
+        window.removeEventListener("pointerup", endResize);
+        window.removeEventListener("pointercancel", endResize);
+        try {
+          if (handle.hasPointerCapture(pointerId)) {
+            handle.releasePointerCapture(pointerId);
+          }
+        } catch {
+          // Capture may already be released by the browser.
+        }
+      };
+      const handleMove = (moveEvent: PointerEvent) => {
+        const delta = startX - moveEvent.clientX;
+        const next = Math.min(
+          containerWidth - MIN_MAIN_WIDTH,
+          Math.max(MIN_INSPECTOR_WIDTH, startWidth + delta),
+        );
+        setInspectorWidth(next);
+      };
+      window.addEventListener("pointermove", handleMove);
+      window.addEventListener("pointerup", endResize);
+      window.addEventListener("pointercancel", endResize);
+    },
+    [measuredInspectorWidth],
+  );
+
+  const handleResizerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      const container = studioBodyRef.current;
+      if (!container) return;
+      const step = 32;
+      const containerWidth = container.getBoundingClientRect().width;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setInspectorWidth(
+          Math.min(containerWidth - MIN_MAIN_WIDTH, measuredInspectorWidth() + step),
+        );
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setInspectorWidth(Math.max(MIN_INSPECTOR_WIDTH, measuredInspectorWidth() - step));
+      } else if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        setInspectorWidth(null);
+      }
+    },
+    [measuredInspectorWidth],
+  );
+
+  useEffect(() => {
+    const onResize = () => {
+      setInspectorWidth((previous) => {
+        if (previous === null) return previous;
+        const container = studioBodyRef.current;
+        if (!container) return previous;
+        const max = container.getBoundingClientRect().width - MIN_MAIN_WIDTH;
+        if (max < MIN_INSPECTOR_WIDTH) return previous;
+        return Math.min(max, Math.max(MIN_INSPECTOR_WIDTH, previous));
+      });
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -1022,9 +1197,6 @@ export function DocumentStudio() {
     const controller = new AbortController();
     checkHealth({ signal: controller.signal })
       .then((result) => setHealth(result))
-      .catch(() => undefined);
-    checkSession({ signal: controller.signal })
-      .then((result) => setSession(result))
       .catch(() => undefined);
     return () => controller.abort();
   }, []);
@@ -1080,13 +1252,6 @@ export function DocumentStudio() {
   const openaiOnline = Boolean(
     health?.azure_configured.openai && (health.openai_deployment_configured ?? true),
   );
-  const authBannerLabel = session
-    ? session.authenticated
-      ? "Local authenticated API · synthetic data only"
-      : "Unauthenticated POC"
-    : hasApiAuthToken()
-      ? "Local authenticated API · synthetic data only"
-      : "Unauthenticated POC";
 
   const handleSourceReady = useCallback((width: number, height: number) => {
     setSourceViewport({ width, height });
@@ -1111,44 +1276,64 @@ export function DocumentStudio() {
   const selectedCell = useMemo(() => findSelectedCell(page, selectedId), [page, selectedId]);
 
   // Unified shape for the thumbnail rail. Demo pages are fully preloaded (only 3
-  // pages); real documents use the lightweight per-page summary so the rail renders
-  // instantly on a 70+ page document instead of waiting on every page's full content.
-  const railItems: RailItem[] = useMemo(
-    () =>
-      document.demo
-        ? pages.map((item) => ({
-            pageNumber: item.page.page_number,
-            width: item.page.width,
-            height: item.page.height,
-            unit: item.page.unit,
-            reviewRequired: item.warnings.length > 0,
-          }))
-        : pageSummaries.map((item) => ({
-            pageNumber: item.page_number,
-            width: item.width,
-            height: item.height,
-            unit: item.unit,
-            reviewRequired: item.review_required,
-          })),
-    [document.demo, pages, pageSummaries],
-  );
+  // pages); real documents use page_count for slots and summaries for dimensions so
+  // the rail can grow as page-range extraction completes.
+  const railItems: RailItem[] = useMemo(() => {
+    if (document.demo) {
+      return pages.map((item) => ({
+        pageNumber: item.page.page_number,
+        width: item.page.width,
+        height: item.page.height,
+        unit: item.page.unit,
+        reviewRequired: item.warnings.length > 0,
+        ready: true,
+      }));
+    }
+    const count = Math.max(document.page_count ?? 0, pageSummaries.length);
+    if (!count) return [];
+    const byNumber = new Map(pageSummaries.map((item) => [item.page_number, item]));
+    return Array.from({ length: count }, (_, index) => {
+      const pageNumber = index + 1;
+      const summary = byNumber.get(pageNumber);
+      return {
+        pageNumber,
+        width: summary?.width ?? 8.5,
+        height: summary?.height ?? 11,
+        unit: summary?.unit ?? "inch",
+        reviewRequired: summary?.review_required ?? false,
+        ready: Boolean(summary),
+      };
+    });
+  }, [document.demo, document.page_count, pages, pageSummaries]);
   const flaggedPageNumbers = useMemo(
     () => railItems.filter((item) => item.reviewRequired).map((item) => item.pageNumber),
     [railItems],
   );
+  const currentPageReady = document.demo || pageSummaries.some((item) => item.page_number === currentPage);
 
   // Fetch the currently viewed page's full content on demand. The thumbnail rail and
   // the source PDF preview never depend on this - only the inspector/overlay panels do
   // - so navigating a 70-page document stays instant even while this is in flight.
   useEffect(() => {
     if (document.demo || !document.id || pageCache[currentPage]) return;
+    if (!currentPageReady) {
+      setPageLoadError(null);
+      return;
+    }
     const controller = new AbortController();
     const documentId = document.id;
     const pageNumber = currentPage;
     getPage(documentId, pageNumber, { signal: controller.signal })
       .then((loaded) => {
         setPageCache((previous) => ({ ...previous, [pageNumber]: loaded }));
-        setSelectedId(standaloneBlocksForPage(loaded)[0]?.block_id ?? null);
+        setSelectedId((previous) => {
+          const ids = new Set([
+            ...standaloneBlocksForPage(loaded).map((block) => block.block_id),
+            ...loaded.tables.flatMap((table) => table.cells.map((cell) => cell.cell_id)),
+          ]);
+          if (previous && ids.has(previous)) return previous;
+          return standaloneBlocksForPage(loaded)[0]?.block_id ?? null;
+        });
         setPageLoadError(null);
       })
       .catch((caught: unknown) => {
@@ -1156,7 +1341,7 @@ export function DocumentStudio() {
         setPageLoadError(caught instanceof Error ? caught.message : "This page could not be loaded.");
       });
     return () => controller.abort();
-  }, [document.demo, document.id, currentPage, pageCache]);
+  }, [document.demo, document.id, currentPage, pageCache, currentPageReady]);
 
   // Quietly prefetch the next page so "Next" feels instant most of the time, without
   // ever eagerly loading the whole document up front. Best-effort: a prefetch failure
@@ -1165,7 +1350,8 @@ export function DocumentStudio() {
   useEffect(() => {
     if (document.demo || !document.id) return;
     const nextPageNumber = currentPage + 1;
-    if (nextPageNumber > pageCount || pageCache[nextPageNumber]) return;
+    const nextReady = pageSummaries.some((item) => item.page_number === nextPageNumber);
+    if (!nextReady || nextPageNumber > pageCount || pageCache[nextPageNumber]) return;
     const controller = new AbortController();
     getPage(document.id, nextPageNumber, { signal: controller.signal })
       .then((loaded) => {
@@ -1173,7 +1359,7 @@ export function DocumentStudio() {
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [document.demo, document.id, currentPage, pageCount, pageCache]);
+  }, [document.demo, document.id, currentPage, pageCount, pageCache, pageSummaries]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1287,32 +1473,79 @@ export function DocumentStudio() {
     setSourceViewport(null);
   }
 
-  async function loadPageSummaries(nextDocument: DocumentDetail, signal?: AbortSignal) {
-    const count = nextDocument.page_count ?? 0;
+  async function loadPageSummaries(
+    nextDocument: DocumentDetail,
+    signal?: AbortSignal,
+    options?: { preservePage?: boolean; keepCache?: boolean },
+  ) {
+    const count = nextDocument.page_count ?? nextDocument.pages_ready ?? 0;
     if (!count) return;
     const summaries = await listPageSummaries(nextDocument.id, { signal });
     if (signal?.aborted) return;
     setPageSummaries(summaries);
-    setPageCache({});
-    setCurrentPage(1);
+    if (!options?.keepCache) {
+      setPageCache({});
+    }
+    if (!options?.preservePage) {
+      setCurrentPage(1);
+    }
   }
 
   async function followJob(documentId: string, signal: AbortSignal) {
+    const pollDeadline = Date.now() + 20 * 60 * 1000;
+    let delayMs = 1500;
     let latest = await getDocument(documentId, { signal });
     if (signal.aborted) return;
     setDocument(latest);
-    for (let attempt = 0; attempt < 240 && !isTerminal(latest.status); attempt += 1) {
-      await wait(1500, signal);
+
+    let lastPagesReady = -1;
+    let lastBatchesDone = -1;
+
+    const refreshPagesIfNeeded = async (doc: DocumentDetail, force = false) => {
+      const ready = doc.pages_ready ?? 0;
+      const batchesDone = doc.translation_batches_done ?? -1;
+      const readyGrew = ready > lastPagesReady;
+      const batchesChanged = batchesDone !== lastBatchesDone;
+      const shouldLoad =
+        force ||
+        readyGrew ||
+        batchesChanged ||
+        ((doc.page_count ?? 0) > 0 && lastPagesReady < 0);
+      if (!shouldLoad) return;
+      lastPagesReady = ready;
+      lastBatchesDone = batchesDone;
+      try {
+        await loadPageSummaries(doc, signal, {
+          preservePage: true,
+          // Keep cached pages while extraction adds thumbnails; refresh when
+          // translation batches change so inspector text stays current.
+          keepCache: readyGrew && !batchesChanged && !force,
+        });
+      } catch {
+        // Keep polling; page list may still be catching up mid-extract.
+      }
+    };
+
+    await refreshPagesIfNeeded(latest, true);
+
+    while (!isTerminal(latest.status) && Date.now() < pollDeadline) {
+      await wait(delayMs, signal);
       latest = await getDocument(documentId, { signal });
       if (signal.aborted) return;
       setDocument(latest);
+      await refreshPagesIfNeeded(latest);
+      delayMs = Math.min(Math.round(delayMs * 1.2), 5000);
     }
-    if ((latest.page_count ?? 0) > 0) {
-      await loadPageSummaries(latest, signal);
+
+    if ((latest.page_count ?? 0) > 0 || (latest.pages_ready ?? 0) > 0) {
+      await loadPageSummaries(latest, signal, { preservePage: true });
     }
     if (signal.aborted) return;
     if (latest.status === "failed") {
       throw new Error(latest.safe_error_message ?? "Document processing failed.");
+    }
+    if (latest.status === "cancelled") {
+      return;
     }
     if (!isTerminal(latest.status)) {
       throw new Error("Processing is still running. Refresh the document in a moment.");
@@ -1325,6 +1558,7 @@ export function DocumentStudio() {
     // second poll loop that interleaves state updates with the first.
     if (busy) return;
     setError(null);
+    setInfo(null);
     const validationError = validateUploadFile(file);
     if (validationError) {
       setError(validationError);
@@ -1368,24 +1602,51 @@ export function DocumentStudio() {
     }
   }
 
-  function handleCancel() {
-    activeRunRef.current?.abort();
-    activeRunRef.current = null;
-    setBusy(false);
+  async function handleCancel() {
     if (document.demo) {
-      setError("Cancelled.");
+      activeRunRef.current?.abort();
+      activeRunRef.current = null;
+      setBusy(false);
+      setInfo("Cancelled.");
+      setError(null);
       return;
     }
-    // Keep the document visible with a terminal local status so Retry works and the
-    // UI is not stuck in a permanent busy/progress state.
-    setDocument((previous) => ({
-      ...previous,
-      status: "failed",
-      current_stage: "Cancelled",
-      progress_percent: previous.progress_percent,
-      safe_error_message: "Processing was cancelled. You can retry when ready.",
-    }));
-    setError("Cancelled. You can retry processing.");
+    if (!API_BASE || !document.id) {
+      setError("Backend not connected. Cancel could not be sent to the server.");
+      return;
+    }
+    const documentId = document.id;
+    setError(null);
+    setInfo(null);
+    setBusy(true);
+    try {
+      await cancelDocument(documentId);
+      activeRunRef.current?.abort();
+      activeRunRef.current = null;
+      const latest = await getDocument(documentId);
+      setDocument(latest);
+      setInfo(latest.safe_error_message ?? "Processing was cancelled. You can retry when ready.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Cancel failed.");
+      // Keep polling if cancel failed and work is still running.
+      if (!isTerminal(document.status) && !activeRunRef.current) {
+        const controller = new AbortController();
+        activeRunRef.current = controller;
+        void followJob(documentId, controller.signal)
+          .catch(() => undefined)
+          .finally(() => {
+            if (activeRunRef.current === controller) {
+              activeRunRef.current = null;
+              setBusy(false);
+            }
+          });
+        return;
+      }
+    } finally {
+      if (!activeRunRef.current) {
+        setBusy(false);
+      }
+    }
   }
 
   async function openDocument(documentId: string) {
@@ -1562,76 +1823,9 @@ export function DocumentStudio() {
             <span className="product-mark-letter">C</span>
             <span className="product-mark-spark" />
           </span>
-          <div className="product-name">
-            <span className="eyebrow">Care intelligence workspace</span>
-            <strong>CareTranslate <em>Studio</em></strong>
-          </div>
-        </div>
-        <div className="service-pills" aria-label="Service status">
-          <span className="service-node">
-            <span className="service-monogram" aria-hidden="true">DI</span>
-            <span className="service-copy"><small>Extract &amp; structure</small><strong>Document Intelligence</strong></span>
-            <i
-              className={diOnline ? "service-online" : "service-offline"}
-              aria-label={diOnline ? "Available" : "Unavailable"}
-            />
-          </span>
-          <span className="service-connector" aria-hidden="true"><i /></span>
-          <span className="service-node">
-            <span className="service-monogram" aria-hidden="true">AI</span>
-            <span className="service-copy"><small>Translate to English</small><strong>Azure OpenAI</strong></span>
-            <i
-              className={openaiOnline ? "service-online" : "service-offline"}
-              aria-label={openaiOnline ? "Available" : health ? "Unavailable" : "Offline"}
-            />
-          </span>
-        </div>
-        <div className="header-actions">
-          <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
-            <Icon name="folder" /> Recent
-          </button>
-          {busy ? (
-            <button className="secondary-button" onClick={handleCancel}><Icon name="close" /> Cancel</button>
-          ) : null}
-          <button className="primary-button" disabled={busy} onClick={() => inputRef.current?.click()}>
-            <span className="button-icon" aria-hidden="true"><Icon name="plus" /></span> Upload document
-          </button>
-        </div>
-      </header>
-
-      <DocumentListPanel
-        backendConnected={Boolean(API_BASE)}
-        currentDocumentId={document.demo ? null : document.id}
-        error={documentListError}
-        items={documentList}
-        loading={documentListLoading}
-        onClose={() => setIsDocumentListOpen(false)}
-        onDelete={(item) => void handleDeleteDocument(item)}
-        onOpen={(documentId) => void openDocument(documentId)}
-        open={isDocumentListOpen}
-      />
-
-      <div className="notice-bar auth-banner" role="status">
-        <span className="notice-icon">i</span>
-        <span className="notice-copy">
-          <strong>{authBannerLabel}</strong>
-          <span>
-            {session?.data_policy ?? "Synthetic or approved de-identified data only."}
-            {!diOnline || !openaiOnline
-              ? " Service pills reflect configured Azure endpoints from /health/ready."
-              : ""}
-          </span>
-        </span>
-      </div>
-
-      <div className="studio-body">
-      <div className="studio-main-column">
-      <section className="document-header">
-        <div className="filename-group">
-          <span className="file-glyph" aria-hidden="true"><i />PDF</span>
           <div className="file-summary">
             <div className="filename-row">
-              <h1>{document.original_filename}</h1>
+              <h1 title={document.original_filename}>{document.original_filename}</h1>
               <StatusBadge document={document} />
             </div>
             <p className="document-meta">
@@ -1657,22 +1851,64 @@ export function DocumentStudio() {
             </p>
           </div>
         </div>
-        <div className="document-actions">
-          {!document.demo && (document.status === "failed" || document.status === "needs_review") ? (
+        <div className="service-pills" aria-label="Service status">
+          <span className="service-node">
+            <span className="service-monogram" aria-hidden="true">DI</span>
+            <span className="service-copy"><small>Extract &amp; structure</small><strong>Document Intelligence</strong></span>
+            <i
+              className={diOnline ? "service-online" : "service-offline"}
+              aria-label={diOnline ? "Available" : "Unavailable"}
+            />
+          </span>
+          <span className="service-connector" aria-hidden="true"><i /></span>
+          <span className="service-node">
+            <span className="service-monogram" aria-hidden="true">AI</span>
+            <span className="service-copy"><small>Translate to English</small><strong>Azure OpenAI</strong></span>
+            <i
+              className={openaiOnline ? "service-online" : "service-offline"}
+              aria-label={openaiOnline ? "Available" : health ? "Unavailable" : "Offline"}
+            />
+          </span>
+        </div>
+        <div className="header-actions">
+          {!document.demo &&
+          (document.status === "failed" ||
+            document.status === "needs_review" ||
+            document.status === "cancelled") ? (
             <button className="secondary-button" disabled={busy} onClick={() => void handleRetry()}><Icon name="refresh" /> Retry</button>
           ) : null}
           <button className="secondary-button" disabled={!page} onClick={() => void handleDownload("page")}><Icon name="download" /> Page JSON</button>
           <button className="secondary-button export-button" disabled={!page} onClick={() => void handleDownload("bilingual")}><Icon name="download" /> Full export</button>
+          <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
+            <Icon name="folder" /> Recent
+          </button>
+          {!document.demo && !isTerminal(document.status) ? (
+            <button className="secondary-button" disabled={busy} onClick={() => void handleCancel()}><Icon name="close" /> Cancel</button>
+          ) : null}
+          <button className="primary-button" disabled={busy} onClick={() => inputRef.current?.click()}>
+            <span className="button-icon" aria-hidden="true"><Icon name="plus" /></span> Upload document
+          </button>
         </div>
-      </section>
+      </header>
 
-      {document.demo ? (
-        <div className="notice-bar">
-          <span className="notice-icon">i</span>
-          <span className="notice-copy"><strong>Interactive preview</strong><span>Explore extraction, page-level translation, structured tables, and JSON review.</span></span>
-        </div>
-      ) : null}
+      <DocumentListPanel
+        backendConnected={Boolean(API_BASE)}
+        currentDocumentId={document.demo ? null : document.id}
+        error={documentListError}
+        items={documentList}
+        loading={documentListLoading}
+        onClose={() => setIsDocumentListOpen(false)}
+        onDelete={(item) => void handleDeleteDocument(item)}
+        onOpen={(documentId) => void openDocument(documentId)}
+        open={isDocumentListOpen}
+      />
 
+      <div
+        className="studio-body"
+        ref={studioBodyRef}
+        style={inspectorWidth !== null ? { gridTemplateColumns: `minmax(0, 1fr) 6px ${inspectorWidth}px` } : undefined}
+      >
+      <div className="studio-main-column">
       {!document.demo && health && (!health.azure_configured.document_intelligence || !health.azure_configured.openai) ? (
         <div className="notice-bar" role="status">
           <span className="notice-icon">!</span>
@@ -1690,6 +1926,12 @@ export function DocumentStudio() {
         </div>
       ) : null}
 
+      {info ? (
+        <div className="info-bar" role="status">
+          <strong>Status</strong><p>{info}</p><button onClick={() => setInfo(null)}>Dismiss</button>
+        </div>
+      ) : null}
+
       {error ? (
         <div className="error-bar" role="alert">
           <span>!</span><strong>Action needed</strong><p>{error}</p><button onClick={() => setError(null)}>Dismiss</button>
@@ -1699,7 +1941,7 @@ export function DocumentStudio() {
       {!isTerminal(document.status) && !document.demo ? (
         <div className="progress-strip" aria-label={document.progress_percent + "% complete"}>
           <span style={{ width: document.progress_percent + "%" }} />
-          <p>{document.current_stage} · {document.progress_percent}%</p>
+          <p>{progressLabel(document)}</p>
         </div>
       ) : null}
 
@@ -1724,39 +1966,53 @@ export function DocumentStudio() {
             {railItems.map((item) => (
               <button
                 aria-current={currentPage === item.pageNumber ? "page" : undefined}
-                className="page-thumbnail"
+                className={"page-thumbnail" + (item.ready ? "" : " is-pending")}
                 key={item.pageNumber}
                 onClick={() => selectPage(item.pageNumber)}
               >
-                <span
-                  className={"thumbnail-paper " + (!document.demo ? "is-pdf" : "")}
-                  style={!document.demo ? {
-                    aspectRatio: `${item.width} / ${item.height}`,
-                    height: "auto",
-                  } : undefined}
-                >
-                  {document.demo ? (
+                {document.demo ? (
+                  <span className="thumbnail-paper">
                     <DemoThumbnail
                       page={pages.find((candidate) => candidate.page.page_number === item.pageNumber)!}
                     />
-                  ) : realSource && canPreviewPdf ? (
-                    <PdfPage
-                      authSrc={realSource}
-                      compact
-                      pageNumber={item.pageNumber}
-                      rotation={0}
-                      src={realSource}
-                      zoom={thumbnailZoom(item)}
-                    />
-                  ) : realSource && canPreviewImage ? (
+                  </span>
+                ) : realSource && canPreviewPdf ? (
+                  <VirtualPdfThumb
+                    authSrc={realSource}
+                    height={item.height}
+                    pageNumber={item.pageNumber}
+                    rotation={0}
+                    src={realSource}
+                    unit={item.unit}
+                    width={item.width}
+                    zoom={thumbnailZoom(item)}
+                  />
+                ) : realSource && canPreviewImage ? (
+                  <span
+                    className="thumbnail-paper"
+                    style={{
+                      aspectRatio: `${item.width} / ${item.height}`,
+                      height: "auto",
+                    }}
+                  >
                     <img
                       alt=""
                       aria-hidden="true"
                       src={realSource}
                       style={{ display: "block", height: "100%", objectFit: "contain", width: "100%" }}
                     />
-                  ) : null}
-                </span>
+                  </span>
+                ) : (
+                  <span
+                    className="thumbnail-paper"
+                    style={{
+                      aspectRatio: `${item.width} / ${item.height}`,
+                      height: "auto",
+                    }}
+                  >
+                    <span className="thumb-placeholder" aria-hidden="true" />
+                  </span>
+                )}
                 <span>Page {item.pageNumber}</span>
                 {item.reviewRequired ? <span className="thumb-warning" title="Review suggested">!</span> : null}
               </button>
@@ -1816,7 +2072,7 @@ export function DocumentStudio() {
                 onClick={() => setOverlays((value) => !value)}
                 title="Toggle extraction overlays"
               >
-                {overlays ? "Hide overlays" : "Show overlays"}
+                {overlays ? "Overlays on hover" : "Enable overlays"}
               </button>
             </div>
           </div>
@@ -1901,11 +2157,22 @@ export function DocumentStudio() {
           <div className="viewer-footer">
             <span><i className="legend-box selected" /> Selected</span>
             <span><i className="legend-box review" /> Review suggested</span>
-            <span className="viewer-tip">Hover an overlay to follow it in the analysis panel</span>
+            <span className="viewer-tip">Hover a text region or result card to highlight it</span>
           </div>
         </section>
       </section>
       </div>
+
+        <div
+          aria-label="Resize document and translation panels"
+          aria-orientation="vertical"
+          className={"panel-resizer" + (isResizingPanels ? " is-resizing" : "")}
+          onDoubleClick={() => setInspectorWidth(null)}
+          onKeyDown={handleResizerKeyDown}
+          onPointerDown={handleResizerPointerDown}
+          role="separator"
+          tabIndex={0}
+        />
 
         <aside className="inspector-panel">
           <div className="inspector-content" ref={inspectorContentRef}>
@@ -1916,7 +2183,14 @@ export function DocumentStudio() {
               </div>
             ) : null}
 
-            {!document.demo && !page && !pageLoadError && document.page_count ? (
+            {!document.demo && !page && !pageLoadError && document.page_count && !currentPageReady ? (
+              <div className="page-loading-message" role="status">
+                <strong>Page {currentPage} is still extracting…</strong>
+                <span>Source preview is available now. Extracted text appears when this page finishes OCR.</span>
+              </div>
+            ) : null}
+
+            {!document.demo && !page && !pageLoadError && currentPageReady && document.page_count ? (
               <div className="page-loading-message" role="status">
                 <strong>Loading page {currentPage}…</strong>
                 <span>Fetching extracted and translated content for this page.</span>

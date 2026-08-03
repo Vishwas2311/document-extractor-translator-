@@ -7,10 +7,11 @@ from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, Up
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.core.auth import AuthPrincipal, require_principal
-from app.core.enums import DocumentStatus, RetryMode
+from app.core.enums import TERMINAL_DOCUMENT_STATUSES, DocumentStatus, RetryMode
 from app.core.exceptions import ConflictError, DocumentNotFoundError, InvalidDocumentError
 from app.dependencies.services import ServiceContainer
 from app.schemas.document import (
+    CancelDocumentResponse,
     DocumentCreateResponse,
     DocumentDetail,
     DocumentListResponse,
@@ -69,8 +70,14 @@ async def list_documents(
 
 @router.get("/{document_id}", response_model=DocumentDetail)
 async def get_document(request: Request, document_id: str) -> Response:
-    document = await container(request).repository.get(document_id)
+    services = container(request)
+    document = await services.repository.get(document_id)
     payload = DocumentDetail.model_validate(document).model_dump(mode="json")
+    if DocumentStatus(document.status) not in TERMINAL_DOCUMENT_STATUSES:
+        metrics = await services.repository.queue_metrics(document_id)
+        payload["queue_position"] = metrics.get("queue_position")
+        payload["active_jobs"] = metrics.get("active_jobs")
+        payload["worker_slots"] = services.runner.concurrency
     return JSONResponse(payload, headers=NO_STORE)
 
 
@@ -94,11 +101,24 @@ async def list_pages(request: Request, document_id: str) -> Response:
     document = await services.repository.get(document_id)
     if document.page_count is None:
         return JSONResponse([], headers=NO_STORE)
+
+    index_path = "pages/index.json"
+    if services.storage.exists(document_id, index_path):
+        index = await services.storage.read_json(document_id, index_path)
+        summaries = [
+            PageSummary.model_validate(item).model_dump(mode="json")
+            for item in index.get("pages", [])
+            if isinstance(item, dict)
+            and 1 <= int(item.get("page_number", 0)) <= int(document.page_count)
+        ]
+        return JSONResponse(summaries, headers=NO_STORE)
+
     summaries: list[PageSummary] = []
     for number in range(1, document.page_count + 1):
-        payload = PageResult.model_validate(
-            await services.storage.read_json(document_id, f"pages/page-{number:04d}.json")
-        )
+        relative = f"pages/page-{number:04d}.json"
+        if not services.storage.exists(document_id, relative):
+            continue
+        payload = PageResult.model_validate(await services.storage.read_json(document_id, relative))
         summaries.append(
             PageSummary(
                 page_number=number,
@@ -108,7 +128,11 @@ async def list_pages(request: Request, document_id: str) -> Response:
                 angle=payload.page.angle,
                 block_count=len(payload.blocks),
                 table_count=len(payload.tables),
-                review_required=bool(payload.warnings),
+                review_required=bool(payload.warnings)
+                or any(block.review_required for block in payload.blocks)
+                or any(
+                    cell.review_required for table in payload.tables for cell in table.cells
+                ),
             )
         )
     return JSONResponse(
@@ -127,7 +151,10 @@ async def get_page(
     document = await services.repository.get(document_id)
     if document.page_count is None or page_number < 1 or page_number > document.page_count:
         raise DocumentNotFoundError("Page was not found.")
-    payload = await services.storage.read_json(document_id, f"pages/page-{page_number:04d}.json")
+    relative = f"pages/page-{page_number:04d}.json"
+    if not services.storage.exists(document_id, relative):
+        raise DocumentNotFoundError("Page is still being extracted.")
+    payload = await services.storage.read_json(document_id, relative)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     etag = f'"{hashlib.sha256(encoded).hexdigest()}"'
     if request.headers.get("if-none-match") == etag:
@@ -165,6 +192,17 @@ async def download_artifact(
         media_type="application/json",
         filename=filename,
         headers=NO_STORE,
+    )
+
+
+@router.post("/{document_id}/cancel", response_model=CancelDocumentResponse, status_code=200)
+async def cancel_document(request: Request, document_id: str) -> CancelDocumentResponse:
+    services = container(request)
+    document = await services.document_service.cancel(document_id)
+    return CancelDocumentResponse(
+        document_id=document.id,
+        status=document.status,
+        message="Processing was cancelled.",
     )
 
 

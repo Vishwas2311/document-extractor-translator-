@@ -12,6 +12,7 @@ class DocumentStatus(StrEnum):
     COMPLETED = "completed"
     NEEDS_REVIEW = "needs_review"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ProcessingStage(StrEnum):
@@ -22,6 +23,7 @@ class ProcessingStage(StrEnum):
     VALIDATION = "validation"
     EXPORT = "export"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class JobStatus(StrEnum):
@@ -29,6 +31,7 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TranslationStatus(StrEnum):
@@ -44,6 +47,13 @@ TERMINAL_DOCUMENT_STATUSES = {
     DocumentStatus.COMPLETED,
     DocumentStatus.NEEDS_REVIEW,
     DocumentStatus.FAILED,
+    DocumentStatus.CANCELLED,
+}
+
+RETRIABLE_DOCUMENT_STATUSES = {
+    DocumentStatus.FAILED,
+    DocumentStatus.NEEDS_REVIEW,
+    DocumentStatus.CANCELLED,
 }
 
 

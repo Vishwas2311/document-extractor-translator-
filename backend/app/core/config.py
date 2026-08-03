@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     storage_root: Path = Path("storage/documents")
     max_upload_size_mb: int = Field(default=50, ge=1, le=500)
     max_document_pages: int = Field(default=200, ge=1, le=2000)
+    # Azure DI page-range size for large PDFs (Microsoft guidance: batch ~25–100 pages).
+    di_page_range_size: int = Field(default=25, ge=1, le=200)
     allowed_extensions: str = "pdf,png,jpg,jpeg,tif,tiff,bmp"
     rate_limit_per_minute: int = Field(default=120, ge=0, le=10000)
     use_create_all: bool = True

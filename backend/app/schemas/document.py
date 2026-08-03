@@ -21,6 +21,9 @@ class DocumentSummary(BaseModel):
     current_stage: str
     progress_percent: int
     page_count: int | None = None
+    pages_ready: int | None = None
+    translation_batches_done: int | None = None
+    translation_batches_total: int | None = None
     source_languages: list[str] = Field(default_factory=list)
     target_language: str
     data_class: str = "synthetic"
@@ -30,6 +33,10 @@ class DocumentSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
+    # Runtime queue observability (filled by the API, not persisted).
+    queue_position: int | None = None
+    active_jobs: int | None = None
+    worker_slots: int | None = None
 
 
 class DocumentDetail(DocumentSummary):
@@ -43,6 +50,12 @@ class DocumentCreateResponse(BaseModel):
     status_url: str
     processing_profile: str | None = None
     data_class: str | None = None
+
+
+class CancelDocumentResponse(BaseModel):
+    document_id: str
+    status: str
+    message: str
 
 
 class DocumentListResponse(BaseModel):

@@ -76,9 +76,10 @@ button:focus-visible {
 
 .global-header {
   z-index: 10;
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) auto minmax(220px, 1fr);
+  display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   min-height: 68px;
   padding: 0 22px;
   color: var(--ink);
@@ -196,32 +197,32 @@ button:focus-visible {
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  min-height: 78px;
-  padding: 12px 20px;
+  min-height: 52px;
+  padding: 8px 20px;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
 
 .filename-group {
   min-width: 0;
-  gap: 12px;
+  gap: 10px;
 }
 
 .file-glyph {
   display: grid;
-  width: 42px;
-  height: 48px;
+  width: 32px;
+  height: 36px;
   place-items: center;
   color: var(--brand);
   background: var(--surface-teal);
   border: 1px solid #cbd5e1;
   border-radius: 8px;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 850;
 }
 
 .filename-row {
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -229,7 +230,7 @@ button:focus-visible {
   max-width: 42vw;
   margin: 0;
   overflow: hidden;
-  font-size: 17px;
+  font-size: 15px;
   letter-spacing: -0.02em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -238,9 +239,9 @@ button:focus-visible {
 .filename-group p {
   display: flex;
   gap: 7px;
-  margin: 5px 0 0;
+  margin: 3px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .status-badge {
@@ -284,6 +285,16 @@ button:focus-visible {
   background: var(--danger);
 }
 
+.status-cancelled {
+  color: #475569;
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.status-cancelled .status-dot {
+  background: #64748b;
+}
+
 .status-completed {
   color: #1c9b5e;
   background: #e8f8ef;
@@ -312,7 +323,8 @@ button:focus-visible {
 
 .notice-bar,
 .error-bar,
-.progress-strip {
+.progress-strip,
+.info-bar {
   position: relative;
   flex: 0 0 auto;
 }
@@ -380,6 +392,31 @@ button:focus-visible {
 }
 
 .error-bar button {
+  margin-left: auto;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.info-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  padding: 8px 20px;
+  color: #1e3a8a;
+  background: #eff6ff;
+  border-bottom: 1px solid #bfdbfe;
+  font-size: 12px;
+}
+
+.info-bar p {
+  margin: 0;
+}
+
+.info-bar button {
   margin-left: auto;
   color: inherit;
   background: transparent;
@@ -971,22 +1008,29 @@ button:focus-visible {
   width: 100%;
   height: 100%;
   padding: 0;
-  background: rgba(3, 105, 161, 0.08);
+  background: transparent;
   border: 0;
   cursor: pointer;
+  transition: background 120ms ease;
 }
 
 .region-overlay::after {
   position: absolute;
   inset: 0;
   content: "";
-  border: 2px solid rgba(3, 105, 161, 0.55);
+  border: 0;
+  transition: border 120ms ease;
 }
 
 .region-overlay:hover,
 .region-overlay.is-hovered {
   z-index: 3;
   background: rgba(3, 105, 161, 0.15);
+}
+
+.region-overlay:hover::after,
+.region-overlay.is-hovered::after {
+  border: 2px solid rgba(3, 105, 161, 0.55);
 }
 
 .region-overlay.is-selected {
@@ -1119,8 +1163,8 @@ button:focus-visible {
 .table-region-outline {
   position: absolute;
   z-index: 4;
-  background: rgba(3, 105, 161, 0.03);
-  border: 2px dashed rgba(3, 105, 161, 0.4);
+  background: transparent;
+  border: 2px dashed transparent;
   border-radius: 3px;
   pointer-events: none;
   transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
@@ -1168,13 +1212,19 @@ button:focus-visible {
   position: absolute;
   inset: 0;
   content: "";
-  border: 1px solid rgba(3, 105, 161, 0.25);
+  border: 0;
+  transition: border 120ms ease;
 }
 
 .table-cell-overlay:hover,
 .table-cell-overlay.is-hovered {
   z-index: 7;
   background: rgba(3, 105, 161, 0.15);
+}
+
+.table-cell-overlay:hover::after,
+.table-cell-overlay.is-hovered::after {
+  border: 1px solid rgba(3, 105, 161, 0.25);
 }
 
 .table-cell-overlay.is-selected {
@@ -1816,10 +1866,9 @@ button:focus-visible {
 .global-header {
   position: relative;
   isolation: isolate;
-  grid-template-columns: minmax(260px, 1fr) auto minmax(260px, 1fr);
-  min-height: 76px;
-  padding: 0 26px;
-  overflow: hidden;
+  min-height: 62px;
+  padding: 8px 26px;
+  overflow: visible;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
@@ -1831,6 +1880,7 @@ button:focus-visible {
 .product-lockup {
   position: relative;
   z-index: 1;
+  flex: 1 1 220px;
   gap: 13px;
   min-width: 0;
 }
@@ -1908,6 +1958,7 @@ button:focus-visible {
 .service-pills {
   position: relative;
   z-index: 1;
+  flex: 0 0 auto;
   gap: 0;
   padding: 4px;
   color: var(--ink);
@@ -2031,9 +2082,11 @@ button:focus-visible {
   position: relative;
   z-index: 1;
   display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 15px;
+  gap: 10px;
 }
 
 .secure-workspace {
@@ -2112,21 +2165,21 @@ button:focus-visible {
 }
 
 .document-header {
-  min-height: 84px;
-  padding: 13px 22px;
+  min-height: 52px;
+  padding: 8px 22px;
   background: rgba(255, 255, 255, 0.98);
   border-bottom-color: #e2e8f0;
   box-shadow: 0 4px 18px rgba(15, 23, 42, 0.05);
 }
 
 .filename-group {
-  gap: 13px;
+  gap: 10px;
 }
 
 .file-glyph {
   position: relative;
-  width: 46px;
-  height: 52px;
+  width: 32px;
+  height: 36px;
   overflow: hidden;
   color: var(--brand-dark);
   background: linear-gradient(145deg, #eaf1f8, #dce6ff);
@@ -2168,7 +2221,7 @@ button:focus-visible {
 .filename-row h1 {
   max-width: 46vw;
   color: var(--ink);
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 750;
   letter-spacing: -0.025em;
 }
@@ -2194,7 +2247,7 @@ button:focus-visible {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px !important;
-  margin-top: 6px !important;
+  margin-top: 3px !important;
   color: var(--muted) !important;
   font-size: 10px !important;
   font-weight: 560;
@@ -2343,12 +2396,25 @@ button:focus-visible {
   border-color: #e2e8f0;
 }
 
+.page-thumbnail.is-pending {
+  opacity: 0.72;
+}
+
 .page-thumbnail[aria-current="page"] {
   color: #075985;
   background: linear-gradient(150deg, #edf9f6, #e6f3f0);
   border-color: #7dd3fc;
   box-shadow: 0 8px 20px rgba(10, 78, 72, 0.1), inset 3px 0 0 #0369a1;
   transform: translateX(1px);
+}
+
+.thumb-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 96px;
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(226, 232, 240, 0.9));
 }
 
 .thumbnail-paper {
@@ -2829,7 +2895,7 @@ button:focus-visible {
 
 .document-header {
   z-index: 3;
-  min-height: 82px;
+  min-height: 52px;
   padding-right: 24px;
   padding-left: 24px;
   background: var(--paper);
@@ -3528,10 +3594,42 @@ button:focus-visible {
 /* Full-height page intelligence column: results from the top, controls mid-dock */
 .studio-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(400px, 34vw);
+  grid-template-columns: minmax(0, 1fr) 6px minmax(340px, 34vw);
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
+}
+
+.panel-resizer {
+  position: relative;
+  z-index: 5;
+  flex: 0 0 auto;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.panel-resizer::after {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1px;
+  height: 100%;
+  content: "";
+  background: var(--workspace-border, #e2e8f0);
+  transform: translateX(-50%);
+  transition: background 120ms ease, width 120ms ease;
+}
+
+.panel-resizer:hover::after,
+.panel-resizer.is-resizing::after,
+.panel-resizer:focus-visible::after {
+  width: 3px;
+  background: #0369a1;
+}
+
+.panel-resizer:focus-visible {
+  outline: 2px solid #0369a1;
+  outline-offset: 2px;
 }
 
 .studio-main-column {
@@ -3669,12 +3767,16 @@ button:focus-visible {
 
 @media (max-width: 1120px) {
   .studio-body {
-    grid-template-columns: 1fr;
+    grid-template-columns: 1fr !important;
     overflow: auto;
   }
 
   .studio-main-column {
     border-right: 0;
+  }
+
+  .panel-resizer {
+    display: none;
   }
 
   .studio-body > .inspector-panel {

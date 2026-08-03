@@ -11,6 +11,27 @@ ENCRYPT_RE = re.compile(rb"/Encrypt(?:\s|/|<<)")
 PAGE_RE = re.compile(rb"/Type\s*/Page(?:\s|/|>>)")
 
 
+def _count_pdf_pages(path: Path, data: bytes) -> int:
+    """Prefer pypdf; fall back to a heuristic /Page object count."""
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path))
+        if getattr(reader, "is_encrypted", False):
+            raise InvalidDocumentError(
+                "Password-protected or encrypted PDFs are not accepted. Export an unencrypted copy."
+            )
+        return len(reader.pages)
+    except InvalidDocumentError:
+        raise
+    except Exception:
+        sample = data[: min(len(data), 2_000_000)]
+        page_count = len(PAGE_RE.findall(sample))
+        if page_count == 0 and len(data) > len(sample):
+            page_count = len(PAGE_RE.findall(data))
+        return page_count
+
+
 def assert_pdf_safe(path: Path, *, max_pages: int) -> int | None:
     """Reject encrypted PDFs and enforce a page ceiling.
 
@@ -30,11 +51,7 @@ def assert_pdf_safe(path: Path, *, max_pages: int) -> int | None:
             "Password-protected or encrypted PDFs are not accepted. Export an unencrypted copy."
         )
 
-    # Count page objects in the first sample; fall back to full file for small docs.
-    page_count = len(PAGE_RE.findall(sample))
-    if page_count == 0 and len(data) > len(sample):
-        page_count = len(PAGE_RE.findall(data))
-
+    page_count = _count_pdf_pages(path, data)
     if page_count > max_pages:
         raise InvalidDocumentError(
             f"Document exceeds the {max_pages}-page limit ({page_count} pages detected)."

@@ -42,6 +42,11 @@ test("keeps credentials out of the client configuration", async () => {
   ]);
 
   assert.match(apiSource, /NEXT_PUBLIC_API_BASE_URL/);
+  assert.match(apiSource, /export function cancelDocument/);
+  assert.match(apiSource, /status === "cancelled"/);
+  const studioSource = await readFile(new URL("../app/document-studio.tsx", import.meta.url), "utf8");
+  assert.match(studioSource, /await cancelDocument\(/);
+  assert.match(studioSource, /status === "cancelled"/);
   assert.doesNotMatch(envExample, /AZURE_.*KEY|API_KEY/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.match(pageSource, /DocumentStudio/);

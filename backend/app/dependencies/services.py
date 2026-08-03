@@ -66,6 +66,8 @@ async def create_container(settings: Settings) -> ServiceContainer:
         worker_id=f"worker-{uuid4().hex[:12]}",
         job_lease_seconds=settings.job_lease_seconds,
         job_heartbeat_seconds=settings.job_heartbeat_seconds,
+        di_page_range_size=settings.di_page_range_size,
+        max_document_pages=settings.max_document_pages,
     )
     runner = InProcessJobRunner(
         processing_service,

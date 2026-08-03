@@ -32,6 +32,7 @@ const DOCUMENT_STATUSES = new Set<DocumentStatus>([
   "completed",
   "needs_review",
   "failed",
+  "cancelled",
 ]);
 
 function isObject(value: unknown): value is Record<string, unknown> {

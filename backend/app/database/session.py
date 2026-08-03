@@ -41,6 +41,9 @@ class Database:
         statements = [
             "ALTER TABLE documents ADD COLUMN data_class VARCHAR(32) DEFAULT 'synthetic'",
             "ALTER TABLE documents ADD COLUMN processing_profile VARCHAR(64) DEFAULT 'GENAI_PSEUDONYMIZED'",
+            "ALTER TABLE documents ADD COLUMN pages_ready INTEGER",
+            "ALTER TABLE documents ADD COLUMN translation_batches_done INTEGER",
+            "ALTER TABLE documents ADD COLUMN translation_batches_total INTEGER",
         ]
         async with self.engine.begin() as connection:
 

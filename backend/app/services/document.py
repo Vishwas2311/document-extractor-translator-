@@ -13,6 +13,7 @@ from app.core.exceptions import ConflictError, InvalidDocumentError
 from app.models.document import Document
 from app.models.processing_job import ProcessingJob
 from app.repositories.documents import DocumentRepository
+from app.services.processing import clear_raw_range_artifacts
 from app.services.security_gateway import SecurityGateway
 from app.services.upload_security import assert_pdf_safe
 from app.storage.local import LocalArtifactStorage
@@ -102,7 +103,9 @@ class DocumentService:
                 raise InvalidDocumentError("File extension does not match its content.")
             final_path = self.storage.source_path(document_id, detected_extension)
             temporary.replace(final_path)
-            assert_pdf_safe(final_path, max_pages=self.settings.max_document_pages)
+            page_estimate = assert_pdf_safe(
+                final_path, max_pages=self.settings.max_document_pages
+            )
         except Exception:
             temporary.unlink(missing_ok=True)
             await self.storage.delete_document(document_id)
@@ -122,6 +125,7 @@ class DocumentService:
             target_language=self.settings.target_language,
             data_class=classified,
             processing_profile=profile.value,
+            page_count=page_estimate,
         )
         job = ProcessingJob(document_id=document_id)
         try:
@@ -145,6 +149,7 @@ class DocumentService:
             ):
                 path = self.storage.artifact_path(document_id, relative)
                 path.unlink(missing_ok=True)
+            clear_raw_range_artifacts(self.storage, document_id)
             translations = self.storage.document_dir(document_id) / "translations"
             if translations.exists():
                 for item in translations.glob("*.json"):
@@ -155,6 +160,9 @@ class DocumentService:
                 for item in translations.glob("*.json"):
                     item.unlink(missing_ok=True)
         return job
+
+    async def cancel(self, document_id: str) -> Document:
+        return await self.repository.cancel_document(document_id)
 
     async def delete(self, document_id: str) -> None:
         document = await self.repository.get(document_id)

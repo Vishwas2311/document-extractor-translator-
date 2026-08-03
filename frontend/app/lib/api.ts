@@ -346,8 +346,31 @@ export function retryDocument(
   );
 }
 
+export function cancelDocument(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<{ document_id: string; status: string; message: string }> {
+  return apiFetch(
+    documentPath(documentId, "/cancel"),
+    (value): value is { document_id: string; status: string; message: string } =>
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as { document_id?: unknown }).document_id === "string" &&
+      typeof (value as { status?: unknown }).status === "string" &&
+      typeof (value as { message?: unknown }).message === "string",
+    "document cancel",
+    { method: "POST" },
+    options,
+  );
+}
+
 export function isTerminal(status: DocumentDetail["status"]): boolean {
-  return status === "completed" || status === "needs_review" || status === "failed";
+  return (
+    status === "completed" ||
+    status === "needs_review" ||
+    status === "failed" ||
+    status === "cancelled"
+  );
 }
 
 export function hasApiAuthToken(): boolean {

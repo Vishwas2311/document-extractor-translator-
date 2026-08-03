@@ -87,7 +87,18 @@ class DocumentIntelligenceAnalyzer:
             features.append(DocumentAnalysisFeature.LANGUAGES)
         return features
 
-    async def analyze(self, source_path: Path) -> dict[str, Any]:
+    async def analyze(
+        self,
+        source_path: Path,
+        *,
+        pages: str | None = None,
+    ) -> dict[str, Any]:
+        """Analyze a document, optionally limited to a 1-based page range string.
+
+        `pages` uses Azure DI syntax, e.g. ``"1-25"`` or ``"26-50"``. Passing
+        page ranges keeps large PDFs under service timeouts and enables
+        progressive extraction.
+        """
         client = await self._get_client()
 
         @retry(
@@ -102,6 +113,7 @@ class DocumentIntelligenceAnalyzer:
                     poller = await client.begin_analyze_document(
                         self.settings.azure_document_intelligence_model_id,
                         body=source,
+                        pages=pages,
                         features=self._features() or None,
                     )
                     result = await poller.result()

@@ -47,6 +47,22 @@ class JobLeaseLostError(AppError):
     retryable = True
 
 
+class JobCancelledError(AppError):
+    """Raised when a worker notices the document was cancelled by the client."""
+
+    code = "job_cancelled"
+    status_code = 409
+    retryable = False
+
+
+class JobSupersededError(AppError):
+    """Raised when a newer processing job replaced this worker's job."""
+
+    code = "job_superseded"
+    status_code = 409
+    retryable = False
+
+
 class AzureServiceError(AppError):
     code = "azure_service_error"
     status_code = 502

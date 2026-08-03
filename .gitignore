@@ -35,3 +35,4 @@ backend/pytest-cache-files-*/
 .idea/
 .DS_Store
 Thumbs.db
+.TrustEngine/

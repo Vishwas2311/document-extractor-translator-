@@ -8,7 +8,8 @@ export type DocumentStatus =
   | "exporting"
   | "completed"
   | "needs_review"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 export type TranslationStatus =
   | "not_required"
@@ -98,6 +99,9 @@ export interface DocumentDetail {
   content_type: string;
   status: DocumentStatus;
   page_count?: number | null;
+  pages_ready?: number | null;
+  translation_batches_done?: number | null;
+  translation_batches_total?: number | null;
   current_stage: string;
   progress_percent: number;
   safe_error_message?: string | null;
@@ -107,6 +111,9 @@ export interface DocumentDetail {
   demo?: boolean;
   processing_profile?: string | null;
   data_class?: string | null;
+  queue_position?: number | null;
+  active_jobs?: number | null;
+  worker_slots?: number | null;
 }
 
 export interface DocumentCreateResponse {
@@ -137,6 +144,9 @@ export interface DocumentSummary {
   current_stage: string;
   progress_percent: number;
   page_count?: number | null;
+  pages_ready?: number | null;
+  translation_batches_done?: number | null;
+  translation_batches_total?: number | null;
   source_languages: string[];
   target_language: string;
   processing_profile?: string | null;
