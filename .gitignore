@@ -28,6 +28,7 @@ frontend/tsconfig.tsbuildinfo
 /data/
 /storage/
 /work/
+/tmp/
 backend/pytest-cache-files-*/
 
 # Editor and OS
@@ -36,3 +37,6 @@ backend/pytest-cache-files-*/
 .DS_Store
 Thumbs.db
 .TrustEngine/
+
+# Large third-party diagram icon packs (not required to run the app)
+docs/diagrams/icons/

@@ -1,8 +1,8 @@
 # CareTranslate Studio Project Memory
 
 **Purpose:** concise, durable context for humans and AI tools
-**Current phase:** local PRD-ready build (auth + processing profiles + worker hardening); full Azure production platform remains a target
-**Last reviewed:** 2026-08-02
+**Current phase:** P0/P1 local evaluation baseline; P2 Azure production platform deferred until extraction experiment evidence
+**Last reviewed:** 2026-08-06
 **Code baseline:** local PRD-ready changes on top of prior `main`
 
 > This file records current facts and approved decisions. It is not a session transcript, task backlog, or place for secrets. Verify volatile facts against the code and deployment before acting.
@@ -30,7 +30,7 @@ If code differs from the documents, report the difference. Do not silently rewri
 - **Application root:** `document-intelligence-platform/` in the current repository.
 - **Purpose:** extract structured content from multilingual case documents, translate supported source content to English, preserve layout/provenance, and provide reviewable results.
 - **Current intended data:** synthetic or de-identified test documents only.
-- **Production intent:** evolve the POC into a secure, auditable, human-reviewed document-processing service.
+- **Production intent:** evolve the local baseline into a secure, auditable, human-reviewed Azure document-processing service.
 
 ## 3. Status vocabulary
 
@@ -41,13 +41,15 @@ If code differs from the documents, report the difference. Do not silently rewri
 
 Never describe a production target as implemented.
 
-## 4. Current POC flow
+## 4. Current local evaluation flow
 
 1. A user selects or drops a supported file in the web UI.
 2. The frontend sends a multipart upload to the FastAPI backend.
 3. The backend validates the request, writes the original file to local storage, and creates a SQLite document record.
 4. In-process background work sends the file to Azure AI Document Intelligence using `prebuilt-layout`.
-5. The mapper creates a normalized extraction artifact containing pages and ordered blocks.
+5. The mapper creates an immutable provider extraction artifact containing pages, ordered blocks,
+   and provider tables; a separate versioned reconciliation stage may derive an effective table
+   from complete row-aligned orphan columns while preserving source-block provenance.
 6. The pipeline determines source language and prepares translatable blocks.
 7. Azure OpenAI translates non-English content to English in batches.
 8. Validation checks identifiers, coverage, ordering, and protected content.
@@ -70,11 +72,11 @@ production target, not a local claim.
 
 - Python 3.12.
 - FastAPI and Pydantic.
-- SQLAlchemy with SQLite for the POC.
+- SQLAlchemy with SQLite for local evaluation.
 - Local filesystem artifact storage.
 - In-process background task execution.
 - Azure AI Document Intelligence with the `prebuilt-layout` model.
-- Azure OpenAI chat completion deployment configured for `gpt-5-mini` in the current POC setup.
+- Azure OpenAI chat completion deployment configured for `gpt-5-mini` in the current local setup.
 - Alembic is present, but production migration discipline is not yet established.
 
 ### Frontend
@@ -90,13 +92,13 @@ These versions are a baseline snapshot, not a permanent constraint. Recheck lock
 ## 6. Stable processing constants
 
 - **Artifact schema version:** `1.0`.
-- **Processing version:** `poc-1`.
-- **Translation prompt version:** `translation-v2-table-aware`.
+- **Processing version:** `prd-local-4` for newly created documents; prior stored attempts retain their original version.
+- **Translation prompt version:** `translation-v3-multilingual-format-aware`.
 - **OCR confidence review threshold:** `0.85`.
-- **Translation batch limit:** 25 blocks.
-- **Translation text limit per batch:** approximately 12,000 characters.
-- **POC file-size ceiling:** 50 MB.
-- **Production page-count target:** 200 pages.
+- **Translation batch limit:** 40 blocks.
+- **Translation text limit per batch:** 16,000 characters.
+- **Local evaluation file-size ceiling:** 150 MB.
+- **Production page-count target:** 300 pages.
 
 Any change that affects persisted structure, interpretation, or translation output must follow the versioning rules in `docs/RULES.md`.
 
@@ -110,15 +112,16 @@ Any change that affects persisted structure, interpretation, or translation outp
 - TIFF/TIF.
 - BMP.
 
-The backend accepts these formats in the current POC. DOCX and XLSX are production export targets, not accepted input formats. The preview experience is not yet equally complete for all accepted formats; PDF preview is the clearest implemented path.
+The backend accepts these formats in the current local baseline. DOCX and XLSX are production export targets, not accepted input formats. The preview experience is not yet equally complete for all accepted formats; PDF preview is the clearest implemented path.
 
 ### Languages
 
-- Arabic to English.
-- Simplified Chinese to English.
-- Traditional Chinese to English.
-- English content should pass through without unnecessary translation.
-- Mixed-language documents require block-level handling and review where confidence is low.
+- Any syntactically valid Azure-detected non-English BCP 47 source tag is eligible for English translation; there is no hard-coded Arabic/Chinese source allowlist.
+- Arabic and Han script fallbacks remain for missing provider hints, including Simplified/Traditional Chinese normalization.
+- English content passes through without unnecessary translation.
+- Latin script without a provider hint is `und`, not guessed as English.
+- Mixed-language content is translated at block/cell level; unknown or invalid language remains review-required.
+- Routing capability does not prove universal quality. Production languages and document families require approved multilingual extraction, translation, protected-token, PII, and correction-rate benchmarks.
 
 ### Output and review direction
 
@@ -128,7 +131,7 @@ The backend accepts these formats in the current POC. DOCX and XLSX are producti
 
 ## 8. Persisted artifacts and state
 
-The POC uses local directories for original uploads and derived JSON artifacts. Server-generated document identifiers must control paths; user file names must not become trusted paths.
+The local baseline uses local directories for original uploads and derived JSON artifacts. Server-generated document identifiers must control paths; user file names must not become trusted paths.
 
 Conceptually, each document retains:
 
@@ -183,16 +186,16 @@ Store names and placeholders in documentation, never real values. Never open or 
 
 ## 11. Approved product decisions
 
-- **Documentation scope:** Describe both the implemented POC and production roadmap.
+- **Documentation scope:** Describe both the implemented local baseline and production roadmap.
 
-- **POC data:** Synthetic or de-identified approved test data only.
+- **Local evaluation data:** Synthetic or de-identified approved test data only.
 
 - **Production data:** Real records only after privacy, security, legal, and operational gates
   are approved.
 
 - **User roles:** Caseworker, Reviewer, Administrator, Auditor, System Operator.
 
-- **Chinese scope:** Support Simplified and Traditional Chinese.
+- **Language scope:** English is the only target. Application routing accepts any valid detected non-English BCP 47 source tag; production enablement remains language/document-family benchmark-gated.
 
 - **Preview:** Every advertised format needs a preview; otherwise narrow and disclose the
   supported preview scope.
@@ -298,33 +301,42 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
 ## 12. Known limitations at the baseline
 
 1. There is no production authentication or role-based authorization.
-2. The POC uses SQLite and local disk, which are not appropriate for horizontally scaled production workloads.
+2. The local baseline uses SQLite and local disk, which are not appropriate for horizontally scaled production workloads.
 3. Processing runs in the API process rather than through a durable queue.
-4. Retry behavior is not yet the versioned three-mode production design.
-5. Reviewer correction and approval workflow is incomplete.
+4. Resume, retranslate, and reprocess are implemented locally, but durable distributed delivery,
+   dead-lettering, and multi-worker recovery remain production targets.
+5. Financial correction, reconstruction decisions, and result approval are implemented;
+   translation/block correction, assignment, organization ownership, and reviewed-export
+   materialization remain incomplete.
 6. Retention, legal hold, deletion orchestration, and audit retention are not implemented end to end.
 7. Preview capability does not fully match all accepted file types.
 8. Some UI security or service-status language is static and must not be treated as deployment evidence.
 9. Production observability, cost controls, alerts, and operational runbooks are missing.
 10. CI release gates, SBOM generation, container scanning, and deployment evidence are not established.
-11. Dependency reproducibility and vulnerability handling need production hardening.
+11. Frontend and Python production dependencies have reviewed lock artifacts and currently audit
+    clean, but CI SBOM/container vulnerability gates are not established.
 12. Tenant isolation, object-level authorization, and production audit trails are not implemented.
-13. There is no document classification, server-side processing-policy gateway, immutable profile decision, or provider/profile kill switch.
-14. The current Azure OpenAI translation path receives full extracted source text; no PII tokenization or pseudonymization boundary exists.
-15. Immediate Document Intelligence analyze-result deletion, deletion evidence, and provider-retention alerting are not implemented.
+13. The backend enforces a processing profile and implements optional financial classification,
+    but the production policy service, deployment allowlist, and operational kill switch are not
+    established.
+14. The pseudonymized route implements a lightweight local tokenization gateway; approved
+    multilingual PII detection and benchmark evidence remain production requirements.
+15. Document Intelligence deletion is attempted immediately when a result ID is available, but
+    durable deletion receipts, retry orchestration, deadline alerts, and deployment evidence are
+    not implemented.
 16. Azure AI Translator and connected/disconnected Document Intelligence/Translator container routes are not implemented.
 17. Managed identity enforcement, private endpoints, outbound egress allowlisting, allowed-region/deployment policy, and modified-abuse-monitoring verification are not implemented.
 
-## 13. Quality baseline from the 2026-08-02 review
+## 13. Quality baseline from the 2026-08-06 review
 
 The following results describe the inspected revision only:
 
-- Backend tests: 21 of 21 passed.
-- Ruff: one known line-length finding in `backend/app/storage/local.py`.
-- Mypy: stopped with an internal error under the installed `2.3.0` environment; this is inconclusive and requires toolchain investigation.
-- Frontend lint: five errors and 162 warnings; one error concerns application memoization and four arise from vendored PDF.js code.
-- Frontend build: inconclusive in the inspected sandbox because process creation returned `spawn EPERM`; do not report this as a confirmed application build failure.
-- Repository CI: no authoritative CI workflow was identified at the baseline.
+- Current backend gate: Ruff passed, Mypy passed for 74 source files, and 119 tests passed.
+- Current frontend gate: production build passed; two rendered HTML tests passed; lint had zero errors and two existing image-element warnings.
+- Current frontend production dependency audit: zero known vulnerabilities after upgrading Next.js
+  and its matching lint configuration to 16.3.0.
+- Alembic upgraded from base through `0007_financial_structure_reviews` and downgraded to base successfully on a disposable SQLite database.
+- Repository CI and P2 deployment evidence are not established.
 
 Re-run all relevant checks after copying these documents or changing code. Replace this section when a newer verified baseline exists; do not simply append an ever-growing test diary.
 
@@ -406,16 +418,31 @@ These rows describe a production target, not the current deployment state.
 
 ## 15. Next engineering priorities
 
-1. Obtain the management/security/privacy/legal decisions in `docs/DATA-SECURITY.md`; keep the POC synthetic-only meanwhile.
+1. Run the controlled synthetic/de-identified 100–200-page extraction experiment and approve recall/cost thresholds; keep the local baseline synthetic-only meanwhile.
 2. Close current quality-gate findings and establish CI.
-3. Make service status and product claims reflect real runtime state.
+3. Add optional active provider probes or recent-call status without confusing configuration with
+   provider health; the UI now labels configuration presence accurately.
 4. Implement authentication, authorization, tenant boundaries, audit events, classification, and the fail-closed policy gateway.
 5. Implement private networking, managed identity, egress controls, allowed-region/deployment policy, and content-free telemetry tests.
 6. Move to PostgreSQL, Blob Storage, Service Bus, and separate workers.
+
+## Financial extraction current state
+
+- **Implemented:** versioned financial schemas (`financial-result-1.4`, `financial-validation-1.3`, `table-reconciliation-1.0`), page decisions, multilingual currency/term layout fallback, immutable provider tables plus bounded aligned-column reconstruction, an ordered page-scoped financial-only stream preserving headings/paragraphs/key-values/lists/tables, semantic cell typing before contextual currency-aware Decimal normalization, monetary-only correction gates, validation reports, formula-safe CSV, XLSX, JSON, page filters, source-page provenance, and focused automated tests.
+- **Implemented but configuration-dependent:** Azure Document Intelligence custom-classifier call and selective bounded-range extraction. Enable with `FINANCIAL_EXTRACTION_MODE=selective` and an approved `FINANCIAL_CLASSIFIER_MODEL_ID`.
+- **Current local default:** `post_extract`; it provides financial artifacts but still performs layout extraction over the full source.
+- **Implemented P1 review:** append-only financial corrections, reconstructed-table accept/reject decisions, and result approve/reject decisions bound to the exact processing version and result SHA-256; approval requires every active reconstruction to be accepted and cannot clear unrelated OCR/translation review.
+- **Implemented retry/reprocess safety:** all retry modes adopt the current processing contract;
+  approved financial results block every retry mode; reprocess adds manifest-first invalidation,
+  complete derived-artifact cleanup, and stale-artifact denial.
+- **Production target:** labeled classifier corpus and quality gates, Entra/tenant authorization, malware quarantine, private Azure networking, Blob/PostgreSQL/Service Bus adapters, durable deletion evidence, and reviewed-export materialization.
+- **Schema migrations:** `0005_financial_extraction` adds financial summary fields and mode; `0006_financial_reviews` adds result hashes, review summaries, constraints, and append-only reviews; `0007_financial_structure_reviews` persists reconstruction decisions.
+- **Detailed specification:** [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md).
 7. Build and red-team the `GENAI_PSEUDONYMIZED` Data Security Gateway, hardened Azure OpenAI adapter, and multilingual leakage benchmark.
-8. Add `MANAGED_NO_LLM`, immediate provider-result deletion, and the required restricted-local container proof of capability.
-9. Add versioned reviewer correction and approval.
-10. Implement all retry modes with idempotent processing and no profile downgrade.
+8. Add `MANAGED_NO_LLM`, durable provider-deletion receipts/retry/alerting (including a documented
+   classifier-result retention decision), and the required restricted-local container proof.
+9. Extend the implemented financial review overlay to translation/block corrections, assignment, reviewed exports, and production authorization.
+10. Move the implemented retry modes to durable Service Bus delivery with dead-letter evidence.
 11. Complete or honestly narrow preview support.
 12. Implement retention, deletion, quarantine, malware scanning, legal hold, and deletion evidence.
 13. Complete security, privacy, accessibility, resilience, and operational readiness gates.

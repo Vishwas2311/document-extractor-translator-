@@ -14,10 +14,17 @@ import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
   checkHealth,
+  checkSession,
   cancelDocument,
+  createFinancialReview,
+  createTranslationReview,
   deleteDocument,
   downloadArtifact,
   fetchSourceBlobUrl,
+  getBilingualDocument,
+  getFinancialResult,
+  getFinancialReviews,
+  getTranslationReviews,
   getDocument,
   getPage,
   isTerminal,
@@ -31,12 +38,17 @@ import type {
   BoundingRegion,
   DocumentDetail,
   DocumentSummary,
+  FinancialContentItem,
+  FinancialResult,
+  FinancialReviewRecord,
   HealthStatus,
   PageResult,
   PageSummary,
+  SessionStatus,
   TableCell,
   TableResult,
   TextBlock,
+  TranslationReviewRecord,
 } from "./types";
 
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
@@ -48,19 +60,21 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   ".tiff",
   ".bmp",
 ]);
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_BYTES_FALLBACK = 150 * 1024 * 1024;
+const CURRENT_FINANCIAL_RESULT_SCHEMA = "financial-result-1.4";
 
 function fileExtension(filename: string): string {
   const index = filename.lastIndexOf(".");
   return index >= 0 ? filename.slice(index).toLowerCase() : "";
 }
 
-function validateUploadFile(file: File): string | null {
+function validateUploadFile(file: File, maxUploadBytes = MAX_UPLOAD_BYTES_FALLBACK): string | null {
   if (!ALLOWED_UPLOAD_EXTENSIONS.has(fileExtension(file.name))) {
     return "Unsupported file type. Upload PDF, PNG, JPEG, TIFF, or BMP.";
   }
-  if (file.size > MAX_UPLOAD_BYTES) {
-    return "File exceeds the 50 MB upload limit.";
+  if (file.size > maxUploadBytes) {
+    const limitMb = Math.round(maxUploadBytes / (1024 * 1024));
+    return `File exceeds the ${limitMb} MB upload limit.`;
   }
   return null;
 }
@@ -94,7 +108,9 @@ function isImageContentType(contentType: string): boolean {
   );
 }
 
-type InspectorTab = "extracted" | "translated" | "json";
+type InspectorTab = "financial" | "page" | "json";
+type PageView = "financial" | "review" | "all";
+type ContentLanguageView = "source" | "english";
 
 type IconName =
   | "close"
@@ -223,6 +239,7 @@ function Icon({ name, className }: { name: IconName; className?: string }) {
 const statusLabels: Record<string, string> = {
   queued: "Queued",
   uploaded: "Uploaded",
+  classifying: "Finding financial pages",
   extracting: "Extracting text",
   normalizing: "Normalizing layout",
   translating: "Translating",
@@ -422,14 +439,23 @@ function polygonFor(region: BoundingRegion, page: PageResult) {
 
 function displayLanguage(language: string) {
   const labels: Record<string, string> = {
-    ar: "Arabic",
-    "zh-Hans": "Mandarin",
-    zh: "Mandarin",
-    mixed: "Mixed",
+    "zh-Hans": "Simplified Chinese",
+    "zh-Hant": "Traditional Chinese",
+    mixed: "Mixed languages",
     en: "English",
-    und: "Unknown",
+    und: "Unknown language",
+    zxx: "No linguistic content",
   };
-  return labels[language] ?? language;
+  if (labels[language]) return labels[language];
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(language) ?? language;
+  } catch {
+    return language;
+  }
+}
+
+function stripListMarker(text: string) {
+  return text.replace(/^\s*(?:[-•‣▪◦]|\d+[.)])\s+/, "");
 }
 
 function thumbnailZoom(dimensions: { width: number; unit: string }) {
@@ -445,6 +471,11 @@ interface RailItem {
   unit: string;
   reviewRequired: boolean;
   ready: boolean;
+  financialSelected: boolean;
+  financialDisposition: PageSummary["financial_disposition"];
+  financialLabel: string | null;
+  financialConfidence: number | null;
+  validationIssueCount: number;
 }
 
 function progressLabel(document: DocumentDetail): string {
@@ -547,7 +578,7 @@ function DemoThumbnail({ page }: { page: PageResult }) {
         return (
           <span
             className={"demo-thumbnail-text " + (block.role === "title" ? "is-title" : "")}
-            dir={block.source_language === "ar" ? "rtl" : "ltr"}
+            dir="auto"
             key={block.block_id}
             style={boundsFor(region, page)}
           >
@@ -842,11 +873,10 @@ function DemoPage({
         const region = regionFor(block, page.page.page_number);
         if (!region) return null;
         const bounds = boundsFor(region, page);
-        const isArabic = block.source_language === "ar";
         return (
           <div
             className={"demo-source-text " + (block.role === "title" ? "demo-title" : "")}
-            dir={isArabic ? "rtl" : "ltr"}
+            dir="auto"
             key={"text-" + block.block_id}
             style={bounds}
           >
@@ -1068,10 +1098,29 @@ export function DocumentStudio() {
   const [document, setDocument] = useState<DocumentDetail>(demoDocument);
   const [pages, setPages] = useState<PageResult[]>(demoPages);
   const [pageSummaries, setPageSummaries] = useState<PageSummary[]>([]);
+  const [financialResult, setFinancialResult] = useState<FinancialResult | null>(null);
+  const [financialReviews, setFinancialReviews] = useState<FinancialReviewRecord[]>([]);
+  const [financialCorrections, setFinancialCorrections] = useState<Record<string, string>>({});
+  const [financialCorrectionCurrencies, setFinancialCorrectionCurrencies] = useState<
+    Record<string, string>
+  >({});
+  const [financialStructureDecisions, setFinancialStructureDecisions] = useState<
+    Record<string, "accepted" | "rejected">
+  >({});
+  const [financialReviewNote, setFinancialReviewNote] = useState("");
+  const [financialReviewSubmitting, setFinancialReviewSubmitting] = useState(false);
+  const [translationReviews, setTranslationReviews] = useState<TranslationReviewRecord[]>([]);
+  const [translationCorrections, setTranslationCorrections] = useState<Record<string, string>>({});
+  const [translationReviewNote, setTranslationReviewNote] = useState("");
+  const [translationReviewSubmitting, setTranslationReviewSubmitting] = useState(false);
+  const [session, setSession] = useState<SessionStatus | null>(null);
+  const [pageView, setPageView] = useState<PageView>("financial");
+  const [contentLanguageView, setContentLanguageView] =
+    useState<ContentLanguageView>("source");
   const [pageCache, setPageCache] = useState<Record<number, PageResult>>({});
   const [pageLoadError, setPageLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [activeTab, setActiveTab] = useState<InspectorTab>("translated");
+  const [activeTab, setActiveTab] = useState<InspectorTab>("financial");
   const [selectedId, setSelectedId] = useState<string | null>(demoPages[0].blocks[0].block_id);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0.82);
@@ -1198,14 +1247,26 @@ export function DocumentStudio() {
     checkHealth({ signal: controller.signal })
       .then((result) => setHealth(result))
       .catch(() => undefined);
+    checkSession({ signal: controller.signal })
+      .then((result) => setSession(result))
+      .catch(() => undefined);
     return () => controller.abort();
+  }, []);
+
+  // Resume a document from ?documentId= after refresh or shared links.
+  useEffect(() => {
+    if (!API_BASE || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const resumeId = params.get("documentId")?.trim();
+    if (!resumeId || resumeId === demoDocument.id) return;
+    void openDocument(resumeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot deep link on mount
   }, []);
 
   // PDF/image previews cannot set Authorization headers. Fetch once with auth and use
   // an object URL for pdf.js / <img>.
   useEffect(() => {
     if (document.demo || !API_BASE || !document.id) {
-      setSourceBlobUrl(null);
       return;
     }
     let revoked = false;
@@ -1248,8 +1309,8 @@ export function DocumentStudio() {
     ? dimensionToCssPixels(page.page.height, pageUnit, zoom)
     : sourceViewport?.height ?? dimensionToCssPixels(11, "inch", zoom);
 
-  const diOnline = Boolean(health?.azure_configured.document_intelligence);
-  const openaiOnline = Boolean(
+  const diConfigured = Boolean(health?.azure_configured.document_intelligence);
+  const openaiConfigured = Boolean(
     health?.azure_configured.openai && (health.openai_deployment_configured ?? true),
   );
 
@@ -1287,6 +1348,14 @@ export function DocumentStudio() {
         unit: item.page.unit,
         reviewRequired: item.warnings.length > 0,
         ready: true,
+        // The bundled multilingual demo is not a financial document. Keep its
+        // classification unset so the UI never presents synthetic care-form
+        // tables as financially classified data.
+        financialSelected: false,
+        financialDisposition: null,
+        financialLabel: null,
+        financialConfidence: null,
+        validationIssueCount: 0,
       }));
     }
     const count = Math.max(document.page_count ?? 0, pageSummaries.length);
@@ -1301,25 +1370,101 @@ export function DocumentStudio() {
         height: summary?.height ?? 11,
         unit: summary?.unit ?? "inch",
         reviewRequired: summary?.review_required ?? false,
-        ready: Boolean(summary),
+        ready: Boolean(
+          summary &&
+            (summary.width > 0 || summary.block_count > 0 || summary.table_count > 0),
+        ),
+        financialSelected: summary?.financial_selected ?? false,
+        financialDisposition: summary?.financial_disposition ?? null,
+        financialLabel: summary?.financial_label ?? null,
+        financialConfidence: summary?.financial_confidence ?? null,
+        validationIssueCount: summary?.validation_issue_count ?? 0,
       };
     });
   }, [document.demo, document.page_count, pages, pageSummaries]);
+  const hasFinancialClassification = railItems.some(
+    (item) => item.financialDisposition != null,
+  );
+  const visibleRailItems = useMemo(() => {
+    if (document.demo || !hasFinancialClassification || pageView === "all") return railItems;
+    if (pageView === "review") {
+      return railItems.filter((item) => item.reviewRequired);
+    }
+    return railItems.filter((item) => item.financialDisposition === "financial");
+  }, [document.demo, hasFinancialClassification, pageView, railItems]);
+  const visiblePageNumbers = useMemo(
+    () => visibleRailItems.map((item) => item.pageNumber),
+    [visibleRailItems],
+  );
+  const currentVisibleIndex = visiblePageNumbers.indexOf(currentPage);
+  const currentPageSummary = useMemo(
+    () => pageSummaries.find((item) => item.page_number === currentPage) ?? null,
+    [currentPage, pageSummaries],
+  );
+  const financialTableById = useMemo(
+    () => new Map(financialResult?.tables.map((table) => [table.table_id, table]) ?? []),
+    [financialResult],
+  );
+  const financialContentItems = useMemo<FinancialContentItem[]>(() => {
+    if (!financialResult) return [];
+    if (financialResult.content_items?.length)
+      return financialResult.content_items;
+    // Compatibility for stored financial-result-1.1 artifacts. Reprocessing creates
+    // the full format-preserving content stream.
+    return financialResult.tables.map((table, index) => ({
+      item_id: `table:${table.table_id}`,
+      item_type: "table",
+      reading_order: index + 1,
+      source_pages: table.source_pages,
+      source_language: "mixed",
+      table_id: table.table_id,
+      relevance: "uncertain",
+      bounding_regions: [],
+      review_required: table.review_required,
+      warnings: ["Reprocess this document to rebuild surrounding financial text."],
+    }));
+  }, [financialResult]);
+  const financialIssues = financialResult?.validation.issues ?? [];
+  const currentFinancialContentItems = useMemo(
+    () =>
+      financialContentItems.filter((item) => item.source_pages.includes(currentPage)),
+    [currentPage, financialContentItems],
+  );
+  const currentFinancialTableCount = useMemo(
+    () =>
+      financialResult?.tables.filter((table) =>
+        table.source_pages.includes(currentPage),
+      ).length ?? 0,
+    [currentPage, financialResult],
+  );
+  const financialCorrectionCells = useMemo(
+    () =>
+      financialResult?.tables.flatMap((table) =>
+        table.cells.filter(
+          (cell) =>
+            cell.value.requires_normalized_correction ||
+            cell.value.requires_currency_correction,
+        ),
+      ) ?? [],
+    [financialResult],
+  );
   const flaggedPageNumbers = useMemo(
     () => railItems.filter((item) => item.reviewRequired).map((item) => item.pageNumber),
     [railItems],
   );
-  const currentPageReady = document.demo || pageSummaries.some((item) => item.page_number === currentPage);
+  const currentPageReady = document.demo || Boolean(
+    currentPageSummary &&
+      (currentPageSummary.width > 0 ||
+        currentPageSummary.block_count > 0 ||
+        currentPageSummary.table_count > 0),
+  );
 
   // Fetch the currently viewed page's full content on demand. The thumbnail rail and
   // the source PDF preview never depend on this - only the inspector/overlay panels do
   // - so navigating a 70-page document stays instant even while this is in flight.
   useEffect(() => {
     if (document.demo || !document.id || pageCache[currentPage]) return;
-    if (!currentPageReady) {
-      setPageLoadError(null);
-      return;
-    }
+    if (!currentPageReady) return;
     const controller = new AbortController();
     const documentId = document.id;
     const pageNumber = currentPage;
@@ -1349,8 +1494,14 @@ export function DocumentStudio() {
   // once the user actually navigates there.
   useEffect(() => {
     if (document.demo || !document.id) return;
-    const nextPageNumber = currentPage + 1;
-    const nextReady = pageSummaries.some((item) => item.page_number === nextPageNumber);
+    const currentIndex = visiblePageNumbers.indexOf(currentPage);
+    const nextPageNumber = visiblePageNumbers[currentIndex + 1];
+    const nextSummary = pageSummaries.find((item) => item.page_number === nextPageNumber);
+    const nextReady = Boolean(
+      nextSummary &&
+        (nextSummary.width > 0 || nextSummary.block_count > 0 || nextSummary.table_count > 0),
+    );
+    if (nextPageNumber == null) return;
     if (!nextReady || nextPageNumber > pageCount || pageCache[nextPageNumber]) return;
     const controller = new AbortController();
     getPage(document.id, nextPageNumber, { signal: controller.signal })
@@ -1359,7 +1510,15 @@ export function DocumentStudio() {
       })
       .catch(() => undefined);
     return () => controller.abort();
-  }, [document.demo, document.id, currentPage, pageCount, pageCache, pageSummaries]);
+  }, [
+    document.demo,
+    document.id,
+    currentPage,
+    pageCount,
+    pageCache,
+    pageSummaries,
+    visiblePageNumbers,
+  ]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -1447,6 +1606,7 @@ export function DocumentStudio() {
 
   const selectPage = useCallback((number: number) => {
     setCurrentPage(number);
+    setPageLoadError(null);
     if (document.demo) {
       const target = pages.find((item) => item.page.page_number === number);
       setSelectedId(target ? standaloneBlocksForPage(target)[0]?.block_id ?? null : null);
@@ -1464,8 +1624,26 @@ export function DocumentStudio() {
     selectPage(next);
   }
 
+  const navigateVisible = useCallback((direction: -1 | 1) => {
+    if (!visiblePageNumbers.length) return;
+    const currentIndex = visiblePageNumbers.indexOf(currentPage);
+    const fallbackIndex = direction > 0 ? 0 : visiblePageNumbers.length - 1;
+    const nextIndex = currentIndex < 0 ? fallbackIndex : currentIndex + direction;
+    const nextPage = visiblePageNumbers[nextIndex];
+    if (nextPage != null) selectPage(nextPage);
+  }, [currentPage, selectPage, visiblePageNumbers]);
+
   function resetPageState() {
     setPageSummaries([]);
+    setFinancialResult(null);
+    setFinancialReviews([]);
+    setFinancialCorrections({});
+    setFinancialCorrectionCurrencies({});
+    setFinancialStructureDecisions({});
+    setFinancialReviewNote("");
+    setTranslationReviews([]);
+    setTranslationCorrections({});
+    setTranslationReviewNote("");
     setPageCache({});
     setPageLoadError(null);
     setCurrentPage(1);
@@ -1477,22 +1655,53 @@ export function DocumentStudio() {
     nextDocument: DocumentDetail,
     signal?: AbortSignal,
     options?: { preservePage?: boolean; keepCache?: boolean },
+    requestedView: PageView = pageView,
   ) {
     const count = nextDocument.page_count ?? nextDocument.pages_ready ?? 0;
     if (!count) return;
-    const summaries = await listPageSummaries(nextDocument.id, { signal });
+    const summaries = await listPageSummaries(
+      nextDocument.id,
+      { signal },
+      requestedView,
+    );
     if (signal?.aborted) return;
     setPageSummaries(summaries);
+    setActiveTab("financial");
+    if (isTerminal(nextDocument.status)) {
+      try {
+        const result = await getFinancialResult(nextDocument.id, { signal });
+        if (!signal?.aborted) setFinancialResult(result);
+      } catch {
+        if (!signal?.aborted) setFinancialResult(null);
+      }
+      try {
+        const history = await getFinancialReviews(nextDocument.id, { signal });
+        if (!signal?.aborted) setFinancialReviews(history.items);
+      } catch {
+        if (!signal?.aborted) setFinancialReviews([]);
+      }
+      try {
+        const translationHistory = await getTranslationReviews(nextDocument.id, { signal });
+        if (!signal?.aborted) setTranslationReviews(translationHistory.items);
+      } catch {
+        if (!signal?.aborted) setTranslationReviews([]);
+      }
+    }
     if (!options?.keepCache) {
       setPageCache({});
     }
     if (!options?.preservePage) {
-      setCurrentPage(1);
+      const firstPage =
+        requestedView === "financial"
+          ? summaries.find((item) => item.financial_selected)?.page_number
+          : summaries[0]?.page_number;
+      setCurrentPage(firstPage ?? 1);
     }
   }
 
   async function followJob(documentId: string, signal: AbortSignal) {
-    const pollDeadline = Date.now() + 20 * 60 * 1000;
+    const pollMinutes = health?.limits?.job_poll_timeout_minutes ?? 90;
+    const pollDeadline = Date.now() + pollMinutes * 60 * 1000;
     let delayMs = 1500;
     let latest = await getDocument(documentId, { signal });
     if (signal.aborted) return;
@@ -1548,7 +1757,10 @@ export function DocumentStudio() {
       return;
     }
     if (!isTerminal(latest.status)) {
-      throw new Error("Processing is still running. Refresh the document in a moment.");
+      setInfo(
+        "Processing is still running in the background. Open the document again to continue monitoring progress."
+      );
+      return;
     }
   }
 
@@ -1559,7 +1771,9 @@ export function DocumentStudio() {
     if (busy) return;
     setError(null);
     setInfo(null);
-    const validationError = validateUploadFile(file);
+    const maxUploadBytes =
+      (health?.limits?.max_upload_size_mb ?? 150) * 1024 * 1024;
+    const validationError = validateUploadFile(file, maxUploadBytes);
     if (validationError) {
       setError(validationError);
       return;
@@ -1661,6 +1875,11 @@ export function DocumentStudio() {
       const detail = await getDocument(documentId, { signal: controller.signal });
       if (controller.signal.aborted) return;
       setDocument(detail);
+      if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        url.searchParams.set("documentId", documentId);
+        window.history.replaceState({}, "", url.toString());
+      }
       resetPageState();
       if (!isTerminal(detail.status)) {
         await followJob(documentId, controller.signal);
@@ -1756,9 +1975,24 @@ export function DocumentStudio() {
     }
   }
 
-  async function handleDownload(artifact: "page" | "extracted" | "bilingual") {
+  async function handleDownload(
+    artifact:
+      | "page"
+      | "extracted"
+      | "bilingual"
+      | "reviewed-bilingual"
+      | "manifest"
+      | "financial"
+      | "financial-csv"
+      | "financial-xlsx",
+  ) {
     if (document.demo) {
-      const payload = artifact === "page" ? page : { ...document, pages };
+      const payload =
+        artifact === "page"
+          ? page
+          : artifact === "financial"
+            ? financialResult ?? { document_id: document.id, tables: [] }
+            : { ...document, pages };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = window.document.createElement("a");
@@ -1772,6 +2006,216 @@ export function DocumentStudio() {
       await downloadArtifact(document.id, artifact, currentPage);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Download failed.");
+    }
+  }
+
+  async function handleFinancialReview(decision: "approved" | "rejected") {
+    if (document.demo || !financialResult || financialReviewSubmitting) return;
+    const corrections = financialCorrectionCells
+      .map((cell) => ({
+        cell_id: cell.cell_id,
+        normalized_value: financialCorrections[cell.cell_id]?.trim() || null,
+        currency:
+          financialCorrectionCurrencies[cell.cell_id]?.trim() ||
+          cell.value.currency ||
+          null,
+        reason: "Reviewer-entered normalized correction",
+      }))
+      .filter(
+        (correction) =>
+          correction.normalized_value != null || correction.currency != null,
+      );
+    const unresolvedCells = financialCorrectionCells.filter(
+      (cell) =>
+        (cell.value.requires_normalized_correction &&
+          !financialCorrections[cell.cell_id]?.trim()) ||
+        (cell.value.requires_currency_correction &&
+          !financialCorrectionCurrencies[cell.cell_id]?.trim()),
+    );
+    const structureDecisions = financialResult.reconciliation_candidate_ids.flatMap(
+      (candidateId) => {
+        const structureDecision = financialStructureDecisions[candidateId];
+        return structureDecision
+          ? [
+              {
+                candidate_id: candidateId,
+                decision: structureDecision,
+                reason: "Reviewer decision recorded in the financial workspace",
+              },
+            ]
+          : [];
+      },
+    );
+    const unresolvedStructures = financialResult.reconciliation_candidate_ids.filter(
+      (candidateId) => financialStructureDecisions[candidateId] !== "accepted",
+    );
+    if (decision === "approved" && unresolvedCells.length) {
+      setError("Resolve every required monetary amount and currency before approval.");
+      return;
+    }
+    if (decision === "approved" && unresolvedStructures.length) {
+      setError("Accept every reconstructed table structure before approval.");
+      return;
+    }
+    setFinancialReviewSubmitting(true);
+    setError(null);
+    try {
+      const persisted = await createFinancialReview(document.id, {
+        decision,
+        note: financialReviewNote.trim() || null,
+        corrections,
+        structure_decisions: structureDecisions,
+      });
+      setFinancialReviews((current) => [persisted, ...current]);
+      setDocument((current) => ({
+        ...current,
+        ...(decision === "rejected"
+          ? { status: "needs_review" as const, current_stage: "needs_review" }
+          : {}),
+        financial_review_status: decision,
+        financial_reviewed_by: persisted.reviewer_subject,
+        financial_reviewed_at: persisted.created_at,
+      }));
+      setInfo(
+        decision === "approved"
+          ? "Financial result approved and audit record saved."
+          : "Financial result rejected and audit record saved.",
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Financial review could not be saved.");
+    } finally {
+      setFinancialReviewSubmitting(false);
+    }
+  }
+
+  async function handleTranslationReview(decision: "approved" | "rejected") {
+    if (document.demo || translationReviewSubmitting) return;
+    setTranslationReviewSubmitting(true);
+    setError(null);
+    try {
+      let corrections = Object.entries(translationCorrections)
+        .filter(([, text]) => text.trim())
+        .map(([key, text]) => {
+          const [kind, ...idParts] = key.split(":");
+          const targetId = idParts.join(":");
+          return {
+            target_kind: (kind === "cell" ? "cell" : "block") as "block" | "cell",
+            target_id: targetId,
+            page_number: currentPage,
+            corrected_translated_text: text.trim(),
+            reason: "Reviewer correction from translation workspace",
+          };
+        });
+
+      if (decision === "approved") {
+        const bilingual = await getBilingualDocument(document.id);
+        const required: Array<{
+          target_kind: "block" | "cell";
+          target_id: string;
+          page_number: number;
+          defaultText: string;
+        }> = [];
+        const blocks = Array.isArray(bilingual.blocks) ? bilingual.blocks : [];
+        for (const block of blocks) {
+          if (!block || typeof block !== "object") continue;
+          const item = block as Record<string, unknown>;
+          if (!item.review_required || typeof item.block_id !== "string") continue;
+          const regions = Array.isArray(item.bounding_regions) ? item.bounding_regions : [];
+          const pageNumber =
+            regions[0] &&
+            typeof regions[0] === "object" &&
+            typeof (regions[0] as { page_number?: unknown }).page_number === "number"
+              ? ((regions[0] as { page_number: number }).page_number)
+              : 1;
+          required.push({
+            target_kind: "block",
+            target_id: item.block_id,
+            page_number: pageNumber,
+            defaultText: typeof item.translated_text === "string" ? item.translated_text : "",
+          });
+        }
+        const tables = Array.isArray(bilingual.tables) ? bilingual.tables : [];
+        for (const table of tables) {
+          if (!table || typeof table !== "object") continue;
+          const cells = Array.isArray((table as { cells?: unknown }).cells)
+            ? ((table as { cells: unknown[] }).cells)
+            : [];
+          for (const cell of cells) {
+            if (!cell || typeof cell !== "object") continue;
+            const item = cell as Record<string, unknown>;
+            if (!item.review_required || typeof item.cell_id !== "string") continue;
+            const regions = Array.isArray(item.bounding_regions) ? item.bounding_regions : [];
+            const pageNumber =
+              regions[0] &&
+              typeof regions[0] === "object" &&
+              typeof (regions[0] as { page_number?: unknown }).page_number === "number"
+                ? ((regions[0] as { page_number: number }).page_number)
+                : 1;
+            required.push({
+              target_kind: "cell",
+              target_id: item.cell_id,
+              page_number: pageNumber,
+              defaultText:
+                typeof item.translated_content === "string" ? item.translated_content : "",
+            });
+          }
+        }
+        const byKey = new Map(
+          corrections.map((item) => [`${item.target_kind}:${item.target_id}`, item]),
+        );
+        for (const target of required) {
+          const key = `${target.target_kind}:${target.target_id}`;
+          if (!byKey.has(key)) {
+            byKey.set(key, {
+              target_kind: target.target_kind,
+              target_id: target.target_id,
+              page_number: target.page_number,
+              corrected_translated_text:
+                translationCorrections[key]?.trim() || target.defaultText,
+              reason: "Reviewer confirmed machine translation",
+            });
+          }
+        }
+        corrections = Array.from(byKey.values()).filter(
+          (item) => item.corrected_translated_text.trim().length >= 0,
+        );
+        const stillMissing = required.filter((target) => {
+          const entry = byKey.get(`${target.target_kind}:${target.target_id}`);
+          return !entry;
+        });
+        if (stillMissing.length) {
+          setError("Resolve every review-flagged translation before approval.");
+          return;
+        }
+      }
+
+      const persisted = await createTranslationReview(document.id, {
+        decision,
+        note: translationReviewNote.trim() || null,
+        corrections,
+      });
+      setTranslationReviews((current) => [persisted, ...current]);
+      setDocument((current) => ({
+        ...current,
+        ...(decision === "rejected"
+          ? { status: "needs_review" as const, current_stage: "needs_review" }
+          : { status: "completed" as const, current_stage: "completed" }),
+        document_review_status: decision === "approved" ? "approved" : "rejected",
+        translation_review_status: decision,
+        translation_reviewed_by: persisted.reviewer_subject,
+        translation_reviewed_at: persisted.created_at,
+      }));
+      setInfo(
+        decision === "approved"
+          ? "Translation approved. Reviewed bilingual export is now available."
+          : "Translation rejected and audit record saved.",
+      );
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Translation review could not be saved.",
+      );
+    } finally {
+      setTranslationReviewSubmitting(false);
     }
   }
 
@@ -1797,18 +2241,23 @@ export function DocumentStudio() {
     function handleKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
       if (target && /^(input|textarea|select)$/i.test(target.tagName)) return;
-      if (event.key === "ArrowRight" && currentPage < viewerPageCount) {
-        selectPage(currentPage + 1);
-      } else if (event.key === "ArrowLeft" && currentPage > 1) {
-        selectPage(currentPage - 1);
+      if (event.key === "ArrowRight") {
+        navigateVisible(1);
+      } else if (event.key === "ArrowLeft") {
+        navigateVisible(-1);
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentPage, viewerPageCount, selectPage]);
+  }, [navigateVisible]);
 
   return (
-    <main className="studio-shell" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop}>
+    <main
+      aria-label="Care intelligence workspace"
+      className="studio-shell"
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={handleDrop}
+    >
       <input
         accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp"
         className="visually-hidden"
@@ -1831,7 +2280,7 @@ export function DocumentStudio() {
             <p className="document-meta">
               <span>{document.demo ? "Interactive demo" : document.current_stage}</span>
               <i aria-hidden="true" />
-              <span>{document.demo ? "Arabic + Mandarin" : "Source document"}</span>
+              <span>{document.demo ? "Multilingual source" : "Source document"}</span>
               <i aria-hidden="true" />
               <span>{pageCount || "—"} pages</span>
               <i aria-hidden="true" />
@@ -1851,13 +2300,13 @@ export function DocumentStudio() {
             </p>
           </div>
         </div>
-        <div className="service-pills" aria-label="Service status">
+        <div className="service-pills" aria-label="Service configuration">
           <span className="service-node">
             <span className="service-monogram" aria-hidden="true">DI</span>
             <span className="service-copy"><small>Extract &amp; structure</small><strong>Document Intelligence</strong></span>
             <i
-              className={diOnline ? "service-online" : "service-offline"}
-              aria-label={diOnline ? "Available" : "Unavailable"}
+              className={diConfigured ? "service-online" : "service-offline"}
+              aria-label={diConfigured ? "Configured" : "Not configured"}
             />
           </span>
           <span className="service-connector" aria-hidden="true"><i /></span>
@@ -1865,20 +2314,40 @@ export function DocumentStudio() {
             <span className="service-monogram" aria-hidden="true">AI</span>
             <span className="service-copy"><small>Translate to English</small><strong>Azure OpenAI</strong></span>
             <i
-              className={openaiOnline ? "service-online" : "service-offline"}
-              aria-label={openaiOnline ? "Available" : health ? "Unavailable" : "Offline"}
+              className={openaiConfigured ? "service-online" : "service-offline"}
+              aria-label={
+                openaiConfigured ? "Configured" : health ? "Not configured" : "Not checked"
+              }
             />
           </span>
         </div>
         <div className="header-actions">
           {!document.demo &&
+          document.financial_review_status !== "approved" &&
           (document.status === "failed" ||
             document.status === "needs_review" ||
             document.status === "cancelled") ? (
             <button className="secondary-button" disabled={busy} onClick={() => void handleRetry()}><Icon name="refresh" /> Retry</button>
           ) : null}
           <button className="secondary-button" disabled={!page} onClick={() => void handleDownload("page")}><Icon name="download" /> Page JSON</button>
-          <button className="secondary-button export-button" disabled={!page} onClick={() => void handleDownload("bilingual")}><Icon name="download" /> Full export</button>
+          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial")}><Icon name="download" /> Financial JSON</button>
+          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial-csv")}><Icon name="download" /> CSV</button>
+          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial-xlsx")}><Icon name="download" /> XLSX</button>
+          <button className="secondary-button export-button" disabled={!page || document.demo} onClick={() => void handleDownload("bilingual")}><Icon name="download" /> Machine bilingual</button>
+          <button
+            className="secondary-button export-button"
+            disabled={document.demo || document.document_review_status !== "approved"}
+            onClick={() => void handleDownload("reviewed-bilingual")}
+          >
+            <Icon name="download" /> Approved bilingual
+          </button>
+          <button
+            className="secondary-button"
+            disabled={document.demo || !isTerminal(document.status)}
+            onClick={() => void handleDownload("manifest")}
+          >
+            <Icon name="download" /> Manifest
+          </button>
           <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
             <Icon name="folder" /> Recent
           </button>
@@ -1948,7 +2417,7 @@ export function DocumentStudio() {
       <section className="workspace-grid workspace-grid--main">
         <aside className="thumbnail-rail" aria-label="Document pages">
           <div className="rail-heading">
-            <span>Document pages</span>
+            <span>Relevant pages</span>
             {flaggedPageNumbers.length ? (
               <button
                 className="rail-flag-jump"
@@ -1962,8 +2431,38 @@ export function DocumentStudio() {
               <span>{pageCount || 0}</span>
             )}
           </div>
+          {!document.demo && hasFinancialClassification ? (
+            <div className="page-view-switcher" aria-label="Page filter" role="group">
+              {(
+                [
+                  { view: "financial", label: "Financial pages", title: "Show financially selected pages" },
+                  { view: "review", label: "Needs review", title: "Show pages flagged for review" },
+                  { view: "all", label: "All pages", title: "Show every page" },
+                ] as const
+              ).map(({ view, label, title }) => (
+                <button
+                  aria-pressed={pageView === view}
+                  className={pageView === view ? "is-active" : ""}
+                  key={view}
+                  onClick={() => {
+                    setPageView(view);
+                    void loadPageSummaries(
+                      document,
+                      undefined,
+                      { keepCache: true },
+                      view,
+                    );
+                  }}
+                  title={title}
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="thumbnail-scroll">
-            {railItems.map((item) => (
+            {visibleRailItems.map((item) => (
               <button
                 aria-current={currentPage === item.pageNumber ? "page" : undefined}
                 className={"page-thumbnail" + (item.ready ? "" : " is-pending")}
@@ -2014,10 +2513,28 @@ export function DocumentStudio() {
                   </span>
                 )}
                 <span>Page {item.pageNumber}</span>
+                {item.financialDisposition ? (
+                  <span
+                    className={"financial-page-badge is-" + item.financialDisposition}
+                    title={
+                      item.financialLabel && item.financialConfidence != null
+                        ? `${item.financialLabel} · ${Math.round(item.financialConfidence * 100)}%`
+                        : undefined
+                    }
+                  >
+                    {item.financialDisposition === "financial"
+                      ? "Financial"
+                      : item.financialDisposition === "uncertain"
+                        ? "Check"
+                        : "Other"}
+                  </span>
+                ) : null}
                 {item.reviewRequired ? <span className="thumb-warning" title="Review suggested">!</span> : null}
               </button>
             ))}
-            {!railItems.length ? <div className="rail-empty">Pages appear after extraction.</div> : null}
+            {!visibleRailItems.length ? (
+              <div className="rail-empty">No pages match this filter.</div>
+            ) : null}
           </div>
         </aside>
 
@@ -2027,8 +2544,8 @@ export function DocumentStudio() {
               <button
                 aria-label="Previous page"
                 className="toolbar-text-button"
-                disabled={currentPage <= 1}
-                onClick={() => selectPage(currentPage - 1)}
+                disabled={currentVisibleIndex <= 0}
+                onClick={() => navigateVisible(-1)}
               >
                 <Icon name="arrowLeft" /> Prev
               </button>
@@ -2036,8 +2553,10 @@ export function DocumentStudio() {
               <button
                 aria-label="Next page"
                 className="toolbar-text-button"
-                disabled={currentPage >= viewerPageCount}
-                onClick={() => selectPage(currentPage + 1)}
+                disabled={
+                  currentVisibleIndex < 0 || currentVisibleIndex >= visiblePageNumbers.length - 1
+                }
+                onClick={() => navigateVisible(1)}
               >
                 Next <Icon name="arrowRight" />
               </button>
@@ -2150,7 +2669,7 @@ export function DocumentStudio() {
               <div className="empty-viewer">
                 <span className="empty-upload-icon"><Icon name="arrowUp" /></span>
                 <h2>{busy ? "Processing your document" : "Upload a document to begin"}</h2>
-                <p>PDF, PNG, JPEG, TIFF, or BMP · Arabic and Mandarin supported</p>
+                <p>PDF, PNG, JPEG, TIFF, or BMP · detected source languages → English</p>
               </div>
             )}
           </div>
@@ -2176,14 +2695,34 @@ export function DocumentStudio() {
 
         <aside className="inspector-panel">
           <div className="inspector-content" ref={inspectorContentRef}>
-            {activeTab === "translated" && document.status === "failed" && document.safe_error_message ? (
+            {activeTab !== "json" && document.status === "failed" && document.safe_error_message ? (
               <div className="translation-status-message" role="status">
                 <strong>{page ? "Translation unavailable" : "Extraction unavailable"}</strong>
                 <span>{document.safe_error_message}</span>
               </div>
             ) : null}
 
-            {!document.demo && !page && !pageLoadError && document.page_count && !currentPageReady ? (
+            {!document.demo &&
+            !page &&
+            !pageLoadError &&
+            currentPageSummary?.financial_selected === false ? (
+              <div className="page-loading-message financial-page-excluded" role="status">
+                <strong>Detailed extraction was not run for page {currentPage}</strong>
+                <span>
+                  Classified as {currentPageSummary.financial_label ?? "non-financial"}
+                  {currentPageSummary.financial_confidence != null
+                    ? ` · ${Math.round(currentPageSummary.financial_confidence * 100)}% confidence`
+                    : ""}.
+                </span>
+              </div>
+            ) : null}
+
+            {!document.demo &&
+            !page &&
+            !pageLoadError &&
+            document.page_count &&
+            !currentPageReady &&
+            currentPageSummary?.financial_selected !== false ? (
               <div className="page-loading-message" role="status">
                 <strong>Page {currentPage} is still extracting…</strong>
                 <span>Source preview is available now. Extracted text appears when this page finishes OCR.</span>
@@ -2204,6 +2743,459 @@ export function DocumentStudio() {
               </div>
             ) : null}
 
+            {activeTab === "financial" ? (
+              <div className="financial-inspector">
+                <div className="financial-summary-card">
+                  <div>
+                    <span className="eyebrow">Format-preserving financial extraction</span>
+                    <strong>Financial document</strong>
+                    <span>
+                      Page {currentPage}: {currentFinancialContentItems.length} structured{" "}
+                      {currentFinancialContentItems.length === 1 ? "item" : "items"}
+                      {" · "}
+                      {currentFinancialTableCount}{" "}
+                      {currentFinancialTableCount === 1 ? "table" : "tables"}
+                      {financialIssues.length
+                        ? ` · ${financialIssues.length} validation issues`
+                        : " · no validation issues"}
+                    </span>
+                  </div>
+                  <div
+                    aria-label="Financial content language"
+                    className="financial-language-switcher"
+                    role="group"
+                  >
+                    <button
+                      aria-pressed={contentLanguageView === "source"}
+                      className={contentLanguageView === "source" ? "is-active" : ""}
+                      onClick={() => setContentLanguageView("source")}
+                      type="button"
+                    >
+                      Source
+                    </button>
+                    <button
+                      aria-pressed={contentLanguageView === "english"}
+                      className={contentLanguageView === "english" ? "is-active" : ""}
+                      onClick={() => setContentLanguageView("english")}
+                      type="button"
+                    >
+                      English
+                    </button>
+                  </div>
+                </div>
+                {financialResult &&
+                financialResult.schema_version !== CURRENT_FINANCIAL_RESULT_SCHEMA ? (
+                  <div className="translation-status-message" role="status">
+                    <strong>Legacy financial normalization</strong>
+                    <span>
+                      Reprocess this document to apply semantic value typing. Normalized
+                      values from the older result are withheld because their meaning was
+                      not classified before normalization.
+                    </span>
+                  </div>
+                ) : null}
+                <div
+                  aria-label="Financial document content"
+                  className="financial-document-flow"
+                >
+                  {currentFinancialContentItems.map((item) => {
+                    const pageNumber = item.source_pages[0];
+                    const table = item.table_id
+                      ? financialTableById.get(item.table_id)
+                      : undefined;
+                    const translatedText = item.translated_text?.trim();
+                    const sourceText = item.source_text?.trim() ?? "";
+                    const displayText =
+                      contentLanguageView === "english" && translatedText
+                        ? translatedText
+                        : sourceText;
+
+                    return (
+                      <section
+                        className={`financial-content-item is-${item.item_type}`}
+                        id={`result-${item.item_id}`}
+                        key={item.item_id}
+                      >
+                        <div className="financial-content-meta">
+                          <button
+                            className="financial-content-page"
+                            onClick={() => {
+                              selectPage(pageNumber);
+                              setSelectedId(table?.cells[0]?.cell_id ?? item.item_id);
+                            }}
+                            type="button"
+                          >
+                            Page {item.source_pages.join(", ")}
+                          </button>
+                          <span>{item.item_type.replace("_", " ")}</span>
+                          <span>{item.relevance}</span>
+                          <span>{displayLanguage(item.source_language)}</span>
+                          {item.review_required ? (
+                            <span className="needs-review-badge">Review required</span>
+                          ) : null}
+                        </div>
+
+                        {item.item_type === "table" && table ? (
+                          <div className="financial-table">
+                            <div className="table-result-heading">
+                              <span>
+                                <Icon name="table" /> Table
+                              </span>
+                              <span>
+                                {table.row_count} × {table.column_count}
+                                {table.currencies.length
+                                  ? ` · ${table.currencies.join(", ")}`
+                                  : ""}
+                                {!table.complete ? " · incomplete" : ""}
+                                {table.classification_override_pages.length
+                                  ? ` · retained across pages ${table.classification_override_pages.join(", ")}`
+                                  : ""}
+                              </span>
+                            </div>
+                            {table.integrity_status === "reconciled" &&
+                            table.reconciliation_candidate_id ? (
+                              <div className="table-reconciliation-review" role="group">
+                                <div>
+                                  <strong>Reconstructed table structure</strong>
+                                  <span>
+                                    Provider: {table.provider_row_count ?? table.row_count} ×{" "}
+                                    {table.provider_column_count ?? table.column_count}; effective:{" "}
+                                    {table.row_count} × {table.column_count}. Reconstructed cells are
+                                    highlighted below.
+                                  </span>
+                                </div>
+                                <button
+                                  aria-pressed={
+                                    financialStructureDecisions[
+                                      table.reconciliation_candidate_id
+                                    ] === "accepted"
+                                  }
+                                  className={
+                                    financialStructureDecisions[
+                                      table.reconciliation_candidate_id
+                                    ] === "accepted"
+                                      ? "is-active"
+                                      : ""
+                                  }
+                                  onClick={() =>
+                                    setFinancialStructureDecisions((current) => ({
+                                      ...current,
+                                      [table.reconciliation_candidate_id!]: "accepted",
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {financialStructureDecisions[
+                                    table.reconciliation_candidate_id
+                                  ] === "accepted"
+                                    ? "Accepted for review"
+                                    : "Accept structure"}
+                                </button>
+                                <button
+                                  aria-pressed={
+                                    financialStructureDecisions[
+                                      table.reconciliation_candidate_id
+                                    ] === "rejected"
+                                  }
+                                  className={
+                                    financialStructureDecisions[
+                                      table.reconciliation_candidate_id
+                                    ] === "rejected"
+                                      ? "is-rejected"
+                                      : ""
+                                  }
+                                  onClick={() =>
+                                    setFinancialStructureDecisions((current) => ({
+                                      ...current,
+                                      [table.reconciliation_candidate_id!]: "rejected",
+                                    }))
+                                  }
+                                  type="button"
+                                >
+                                  {financialStructureDecisions[
+                                    table.reconciliation_candidate_id
+                                  ] === "rejected"
+                                    ? "Rejected for review"
+                                    : "Reject structure"}
+                                </button>
+                                <span aria-live="polite" className="structure-decision-help">
+                                  {financialStructureDecisions[
+                                    table.reconciliation_candidate_id
+                                  ]
+                                    ? "Selection ready. Use Approve or Reject below to save the audit record."
+                                    : "Choose the effective table structure, then save it with the reviewer decision below."}
+                                </span>
+                              </div>
+                            ) : null}
+                            <div
+                              className="table-result-grid"
+                              style={{
+                                gridTemplateColumns:
+                                  "repeat(" +
+                                  Math.max(table.column_count, 1) +
+                                  ", minmax(0, 1fr))",
+                              }}
+                            >
+                              {table.cells.map((cell) => {
+                                const translatedCellText = cell.translated_text?.trim();
+                                const cellText =
+                                  contentLanguageView === "english" && translatedCellText
+                                    ? translatedCellText
+                                    : cell.value.raw_text;
+
+                                return (
+                                  <button
+                                    className={
+                                      "table-cell-result financial-cell " +
+                                      (cell.review_required ||
+                                      cell.value.requires_normalized_correction ||
+                                      cell.value.requires_currency_correction
+                                        ? "needs-review "
+                                        : "") +
+                                      (cell.origin === "reconstructed"
+                                        ? "is-reconstructed "
+                                        : "") +
+                                      (selectedId === cell.cell_id ? "is-selected" : "")
+                                    }
+                                    dir="auto"
+                                    id={"result-" + cell.cell_id}
+                                    key={cell.cell_id}
+                                    onClick={() => {
+                                      selectPage(cell.source_page);
+                                      setSelectedId(cell.cell_id);
+                                    }}
+                                    style={{
+                                      gridColumn: `${cell.column_index + 1} / span ${cell.column_span}`,
+                                      gridRow: `${cell.row_index + 1} / span ${cell.row_span}`,
+                                    }}
+                                    type="button"
+                                  >
+                                    <span>{cellText || "—"}</span>
+                                    {contentLanguageView === "english" &&
+                                    translatedCellText &&
+                                    translatedCellText !== cell.value.raw_text ? (
+                                      <small>{cell.value.raw_text}</small>
+                                    ) : null}
+                                    {cell.value.normalized_value != null &&
+                                    (cell.value.semantic_type === "monetary_amount" ||
+                                      cell.value.semantic_type === "percentage") ? (
+                                      <small className="financial-normalized-value">
+                                        Normalized: {cell.value.normalized_value}
+                                      </small>
+                                    ) : null}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {item.item_type === "heading" ? (
+                          <h3 dir="auto">{displayText || "Untitled financial section"}</h3>
+                        ) : null}
+
+                        {item.item_type === "key_value" ? (
+                          contentLanguageView === "english" &&
+                          translatedText &&
+                          !item.translated_key ? (
+                            <p dir="auto">{translatedText}</p>
+                          ) : (
+                            <dl className="financial-key-value" dir="auto">
+                              <dt>
+                                {contentLanguageView === "english"
+                                  ? item.translated_key ?? item.key
+                                  : item.key}
+                              </dt>
+                              <dd>
+                                {contentLanguageView === "english"
+                                  ? item.translated_value ?? item.value
+                                  : item.value}
+                              </dd>
+                            </dl>
+                          )
+                        ) : null}
+
+                        {item.item_type === "list_item" ? (
+                          <div className="financial-list-item" dir="auto">
+                            <span aria-hidden="true">•</span>
+                            <p>{stripListMarker(displayText)}</p>
+                          </div>
+                        ) : null}
+
+                        {item.item_type === "paragraph" ? (
+                          <p dir="auto">{displayText}</p>
+                        ) : null}
+
+                        {contentLanguageView === "english" &&
+                        translatedText &&
+                        sourceText &&
+                        translatedText !== sourceText &&
+                        item.item_type !== "table" ? (
+                          <p className="financial-source-original" dir="auto">
+                            Source: {sourceText}
+                          </p>
+                        ) : null}
+
+                        {item.warnings.length ? (
+                          <ul className="financial-content-warnings">
+                            {item.warnings.map((warning) => (
+                              <li key={warning}>{warning}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </section>
+                    );
+                  })}
+                </div>
+                {financialIssues.length ? (
+                  <section className="financial-validation-list" aria-label="Financial validation">
+                    <strong>Validation</strong>
+                    {financialIssues.map((issue) => (
+                      <div className={"validation-issue is-" + issue.severity} key={issue.issue_id}>
+                        <span>{issue.severity}</span>
+                        <p>{issue.message}</p>
+                      </div>
+                    ))}
+                  </section>
+                ) : null}
+                {financialCorrectionCells.length ? (
+                  <section className="financial-correction-list" aria-label="Financial corrections">
+                    <strong>Required monetary corrections</strong>
+                    <p>
+                      Only monetary values that cannot be normalized safely appear here.
+                      Measurements, dates, phone numbers, account numbers, identifiers, and
+                      percentage ranges remain unchanged.
+                    </p>
+                    {financialCorrectionCells.map((cell) => (
+                      <label key={cell.cell_id}>
+                        <span>{cell.value.raw_text} · page {cell.source_page}</span>
+                        {cell.value.requires_normalized_correction ? (
+                          <input
+                            aria-label={`Normalized correction for ${cell.value.raw_text}`}
+                            inputMode="decimal"
+                            onChange={(event) =>
+                              setFinancialCorrections((current) => ({
+                                ...current,
+                                [cell.cell_id]: event.target.value,
+                              }))
+                            }
+                            placeholder="Normalized decimal value"
+                            value={financialCorrections[cell.cell_id] ?? ""}
+                          />
+                        ) : null}
+                        {cell.value.requires_currency_correction ? (
+                          <select
+                            aria-label={`Currency correction for ${cell.value.raw_text}`}
+                            onChange={(event) =>
+                              setFinancialCorrectionCurrencies((current) => ({
+                                ...current,
+                                [cell.cell_id]: event.target.value,
+                              }))
+                            }
+                            value={financialCorrectionCurrencies[cell.cell_id] ?? ""}
+                          >
+                            <option value="">Select currency</option>
+                            {cell.value.currency_candidates.map((currency) => (
+                              <option key={currency} value={currency}>
+                                {currency}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+                      </label>
+                    ))}
+                  </section>
+                ) : null}
+                {financialResult ? (
+                  <section className="financial-review-panel" aria-label="Financial review decision">
+                    <strong>Reviewer decision</strong>
+                    <textarea
+                      aria-label="Financial review note"
+                      maxLength={4000}
+                      onChange={(event) => setFinancialReviewNote(event.target.value)}
+                      placeholder="Decision note (recommended; required by your operating policy)"
+                      value={financialReviewNote}
+                    />
+                    <div className="financial-review-actions">
+                      <button
+                        disabled={
+                          financialReviewSubmitting ||
+                          financialResult.validation.error_count > 0 ||
+                          financialCorrectionCells.some(
+                            (cell) =>
+                              (cell.value.requires_normalized_correction &&
+                                !financialCorrections[cell.cell_id]?.trim()) ||
+                              (cell.value.requires_currency_correction &&
+                                !financialCorrectionCurrencies[cell.cell_id]?.trim()),
+                          ) ||
+                          financialResult.reconciliation_candidate_ids.some(
+                            (candidateId) =>
+                              financialStructureDecisions[candidateId] !== "accepted",
+                          )
+                        }
+                        onClick={() => void handleFinancialReview("approved")}
+                        type="button"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        disabled={financialReviewSubmitting}
+                        onClick={() => void handleFinancialReview("rejected")}
+                        type="button"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                    {financialReviews.length ? (
+                      <ul className="financial-review-history">
+                        {financialReviews.map((review) => (
+                          <li key={review.id}>
+                            <strong>
+                              {review.decision} · {review.active_result ? "current result" : "prior result"}
+                            </strong>
+                            <span>{new Date(review.created_at).toLocaleString()}</span>
+                            <span>{review.corrections.length} corrections</span>
+                            <span>
+                              {review.structure_decisions.length} structure decisions
+                            </span>
+                            {review.note ? <p>{review.note}</p> : null}
+                            {review.corrections.length ? (
+                              <details>
+                                <summary>Show corrections</summary>
+                                <ul>
+                                  {review.corrections.map((correction) => (
+                                    <li key={correction.cell_id}>
+                                      <code>{correction.cell_id}</code>
+                                      <span>
+                                        {correction.normalized_value ?? "not normalized"}
+                                        {correction.currency ? ` ${correction.currency}` : ""}
+                                      </span>
+                                      <span>{correction.reason}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </details>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No reviewer decision has been recorded.</p>
+                    )}
+                  </section>
+                ) : null}
+                {!currentFinancialContentItems.length && financialResult ? (
+                  <div className="page-loading-message" role="status">
+                    <strong>No financial content was resolved for page {currentPage}</strong>
+                    <span>
+                      Open the Page tab for full OCR on this page, or review selected source pages
+                      and reprocess after correcting classification.
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             {activeTab === "json" && page ? (
               <div className="json-panel">
                 <div className="json-meta"><span>page-{String(currentPage).padStart(4, "0")}.json</span><span>Schema v{page.schema_version}</span></div>
@@ -2211,11 +3203,42 @@ export function DocumentStudio() {
               </div>
             ) : null}
 
-            {activeTab !== "json" && page ? (
+            {activeTab === "page" && page ? (
               <>
-                <div className="result-count">
-                  <strong>{activeTab === "extracted" ? "Extracted text" : "English translation"}</strong>
-                  <span>{standaloneBlocks.length} text regions · {page.tables.length} structured {page.tables.length === 1 ? "table" : "tables"}</span>
+                <div className="financial-summary-card page-ocr-summary">
+                  <div>
+                    <span className="eyebrow">Full page OCR</span>
+                    <strong>
+                      {contentLanguageView === "english" ? "Page English" : "Page source"}
+                    </strong>
+                    <span>
+                      {standaloneBlocks.length} text regions · {page.tables.length} structured{" "}
+                      {page.tables.length === 1 ? "table" : "tables"}
+                      {" · "}Financial stream stays on the Financial tab
+                    </span>
+                  </div>
+                  <div
+                    aria-label="Page content language"
+                    className="financial-language-switcher"
+                    role="group"
+                  >
+                    <button
+                      aria-pressed={contentLanguageView === "source"}
+                      className={contentLanguageView === "source" ? "is-active" : ""}
+                      onClick={() => setContentLanguageView("source")}
+                      type="button"
+                    >
+                      Source
+                    </button>
+                    <button
+                      aria-pressed={contentLanguageView === "english"}
+                      className={contentLanguageView === "english" ? "is-active" : ""}
+                      onClick={() => setContentLanguageView("english")}
+                      type="button"
+                    >
+                      English
+                    </button>
+                  </div>
                 </div>
                 {page.tables.length ? (
                   <p className="table-grouping-note">
@@ -2265,9 +3288,38 @@ export function DocumentStudio() {
                                   }}
                                   type="button"
                                 >
-                                  <span>{activeTab === "translated" ? cell.translated_content || "Translation pending" : cell.content}</span>
-                                  {activeTab === "translated" ? (
-                                    <small dir={cell.source_language === "ar" ? "rtl" : "ltr"}>{cell.content}</small>
+                                  <span>
+                                    {contentLanguageView === "english"
+                                      ? cell.translated_content || "Translation pending"
+                                      : cell.content}
+                                  </span>
+                                  {contentLanguageView === "english" ? (
+                                    <small dir="auto">{cell.content}</small>
+                                  ) : null}
+                                  {cell.review_required && contentLanguageView === "english" ? (
+                                    <label
+                                      className="translation-correction-field"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <span>Reviewer correction</span>
+                                      <textarea
+                                        aria-label={`Correction for table cell ${cell.cell_id}`}
+                                        maxLength={20000}
+                                        onChange={(event) =>
+                                          setTranslationCorrections((current) => ({
+                                            ...current,
+                                            [`cell:${cell.cell_id}`]: event.target.value,
+                                          }))
+                                        }
+                                        placeholder={cell.translated_content || "Enter corrected English"}
+                                        rows={2}
+                                        value={
+                                          translationCorrections[`cell:${cell.cell_id}`] ??
+                                          cell.translated_content ??
+                                          ""
+                                        }
+                                      />
+                                    </label>
                                   ) : null}
                                 </button>
                               );
@@ -2299,18 +3351,95 @@ export function DocumentStudio() {
                           {block.ocr_confidence != null ? <span className="confidence-chip">{Math.round(block.ocr_confidence * 100)}% OCR</span> : null}
                           {block.review_required ? <span className="review-chip">Review</span> : null}
                         </span>
-                        {activeTab === "translated" ? (
+                        {contentLanguageView === "english" ? (
                           <>
                             <span className="translation-text">{block.translated_text || "Translation pending"}</span>
-                            <span className="source-preview" dir={block.source_language === "ar" ? "rtl" : "ltr"}>{block.source_text}</span>
+                            <span className="source-preview" dir="auto">{block.source_text}</span>
+                            {block.review_required ? (
+                              <label
+                                className="translation-correction-field"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <span>Reviewer correction</span>
+                                <textarea
+                                  aria-label={`Correction for region ${block.reading_order}`}
+                                  maxLength={20000}
+                                  onChange={(event) =>
+                                    setTranslationCorrections((current) => ({
+                                      ...current,
+                                      [`block:${block.block_id}`]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={block.translated_text || "Enter corrected English"}
+                                  rows={2}
+                                  value={
+                                    translationCorrections[`block:${block.block_id}`] ??
+                                    block.translated_text ??
+                                    ""
+                                  }
+                                />
+                              </label>
+                            ) : null}
                           </>
                         ) : (
-                          <span className="extracted-text" dir={block.source_language === "ar" ? "rtl" : "ltr"}>{block.source_text}</span>
+                          <span className="extracted-text" dir="auto">{block.source_text}</span>
                         )}
                       </button>
                     );
                   })}
                 </div>
+                {!document.demo && isTerminal(document.status) ? (
+                  <section className="financial-review-panel" aria-label="Translation review decision">
+                    <strong>Translation reviewer decision</strong>
+                    <span>
+                      {document.translation_review_status
+                        ? `Current status: ${document.translation_review_status}`
+                        : "Approve after resolving review chips, or reject for rework."}
+                      {session?.roles?.length
+                        ? ` · Signed in as ${session.subject ?? "token"} (${session.roles.join(", ")})`
+                        : ""}
+                    </span>
+                    <textarea
+                      aria-label="Translation review note"
+                      maxLength={2000}
+                      onChange={(event) => setTranslationReviewNote(event.target.value)}
+                      placeholder="Decision note (optional)"
+                      value={translationReviewNote}
+                    />
+                    <div className="financial-review-actions">
+                      <button
+                        disabled={translationReviewSubmitting || document.translation_review_status === "approved"}
+                        onClick={() => void handleTranslationReview("approved")}
+                        type="button"
+                      >
+                        Approve translation
+                      </button>
+                      <button
+                        disabled={translationReviewSubmitting}
+                        onClick={() => void handleTranslationReview("rejected")}
+                        type="button"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                    {translationReviews.length ? (
+                      <ul className="financial-review-history">
+                        {translationReviews.map((review) => (
+                          <li key={review.id}>
+                            <strong>
+                              {review.decision} · {review.active_result ? "current result" : "prior result"}
+                            </strong>
+                            <span>{new Date(review.created_at).toLocaleString()}</span>
+                            <span>{review.corrections.length} corrections</span>
+                            {review.note ? <p>{review.note}</p> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>No translation reviewer decision has been recorded.</p>
+                    )}
+                  </section>
+                ) : null}
               </>
             ) : null}
           </div>
@@ -2330,8 +3459,8 @@ export function DocumentStudio() {
               <strong className="language-token is-target">English</strong>
             </div>
             <div className="inspector-dock-actions">
-              <div className="tab-list" role="tablist" aria-label="Page results">
-                {(["extracted", "translated", "json"] as InspectorTab[]).map((tab) => (
+              <div className="tab-list" role="tablist" aria-label="Inspector results">
+                {(["financial", "page", "json"] as InspectorTab[]).map((tab) => (
                   <button
                     aria-selected={activeTab === tab}
                     className={activeTab === tab ? "active" : ""}
@@ -2340,7 +3469,7 @@ export function DocumentStudio() {
                     role="tab"
                     type="button"
                   >
-                    {tab === "extracted" ? "Extracted" : tab === "translated" ? "Translated" : "JSON"}
+                    {tab === "financial" ? "Financial" : tab === "page" ? "Page" : "JSON"}
                   </button>
                 ))}
               </div>

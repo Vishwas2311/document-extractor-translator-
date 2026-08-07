@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,15 +9,19 @@ import structlog
 from fastapi import UploadFile
 
 from app.core.config import Settings
-from app.core.enums import TERMINAL_DOCUMENT_STATUSES, DocumentStatus, RetryMode
+from app.core.enums import (
+    TERMINAL_DOCUMENT_STATUSES,
+    DocumentStatus,
+    JobStatus,
+    RetryMode,
+)
 from app.core.exceptions import ConflictError, InvalidDocumentError
 from app.models.document import Document
 from app.models.processing_job import ProcessingJob
 from app.repositories.documents import DocumentRepository
-from app.services.processing import clear_raw_range_artifacts
 from app.services.security_gateway import SecurityGateway
 from app.services.upload_security import assert_pdf_safe
-from app.storage.local import LocalArtifactStorage
+from app.storage.base import ArtifactStorage
 
 logger = structlog.get_logger(__name__)
 
@@ -28,7 +33,7 @@ class DocumentService:
         self,
         settings: Settings,
         repository: DocumentRepository,
-        storage: LocalArtifactStorage,
+        storage: ArtifactStorage,
         gateway: SecurityGateway | None = None,
     ) -> None:
         self.settings = settings
@@ -56,6 +61,8 @@ class DocumentService:
         *,
         data_class: str | None = None,
         processing_profile: str | None = None,
+        owner_subject: str = "local-api-token",
+        organization_id: str = "org-local",
     ) -> Document:
         original_name = Path(upload.filename or "document").name
         original_name = SAFE_FILENAME_RE.sub("_", original_name)[:255]
@@ -125,7 +132,12 @@ class DocumentService:
             target_language=self.settings.target_language,
             data_class=classified,
             processing_profile=profile.value,
+            financial_extraction_mode=self.settings.financial_extraction_mode,
             page_count=page_estimate,
+            organization_id=organization_id,
+            owner_subject=owner_subject,
+            assignment_status="unassigned",
+            document_review_status="draft",
         )
         job = ProcessingJob(document_id=document_id)
         try:
@@ -141,24 +153,59 @@ class DocumentService:
         *,
         mode: RetryMode = RetryMode.RESUME,
     ) -> ProcessingJob:
+        document = await self.repository.get(document_id)
+        if getattr(document, "financial_review_status", None) == "approved":
+            raise ConflictError(
+                "Approved financial results cannot be overwritten by retry."
+            )
+        if getattr(document, "translation_review_status", None) == "approved":
+            raise ConflictError(
+                "Approved translation results cannot be overwritten by retry."
+            )
+        if getattr(document, "document_review_status", None) == "approved":
+            raise ConflictError(
+                "Approved documents cannot be overwritten by retry."
+            )
         job = await self.repository.create_retry_job(document_id, mode=mode)
         if mode == RetryMode.REPROCESS:
-            for relative in (
-                "raw/document_intelligence.json",
-                "normalized/extracted.json",
-            ):
-                path = self.storage.artifact_path(document_id, relative)
-                path.unlink(missing_ok=True)
-            clear_raw_range_artifacts(self.storage, document_id)
-            translations = self.storage.document_dir(document_id) / "translations"
-            if translations.exists():
-                for item in translations.glob("*.json"):
-                    item.unlink(missing_ok=True)
+            try:
+                # Invalidate the completion marker before touching any derived file.
+                # Readers can then fail closed even if cleanup is interrupted midway.
+                await self.storage.delete_artifact(document_id, "manifest.json")
+                for prefix in (
+                    "pages",
+                    "exports",
+                    "raw",
+                    "normalized",
+                    "classification",
+                    "validation",
+                    "translations",
+                    "processing",
+                ):
+                    await self.storage.delete_prefix(document_id, prefix)
+            except Exception:
+                now = datetime.now(UTC)
+                await self.repository.finish_processing(
+                    document_id,
+                    job.id,
+                    document_values={
+                        "status": DocumentStatus.FAILED.value,
+                        "current_stage": DocumentStatus.FAILED.value,
+                        "error_code": "reprocess_cleanup_failed",
+                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
+                        "completed_at": now,
+                    },
+                    job_values={
+                        "status": JobStatus.FAILED.value,
+                        "stage": DocumentStatus.FAILED.value,
+                        "error_code": "reprocess_cleanup_failed",
+                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
+                        "completed_at": now,
+                    },
+                )
+                raise
         elif mode == RetryMode.RETRANSLATE:
-            translations = self.storage.document_dir(document_id) / "translations"
-            if translations.exists():
-                for item in translations.glob("*.json"):
-                    item.unlink(missing_ok=True)
+            await self.storage.delete_prefix(document_id, "translations")
         return job
 
     async def cancel(self, document_id: str) -> Document:

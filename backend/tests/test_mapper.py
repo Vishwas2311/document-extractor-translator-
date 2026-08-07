@@ -118,6 +118,9 @@ def test_table_cell_paragraphs_are_not_duplicated_as_text_blocks() -> None:
                 ],
             },
         ],
+        "languages": [
+            {"locale": "fr", "spans": [{"offset": 6, "length": 11}]},
+        ],
         "tables": [
             {
                 "rowCount": 1,
@@ -154,3 +157,4 @@ def test_table_cell_paragraphs_are_not_duplicated_as_text_blocks() -> None:
     assert [block.source_text for block in result.blocks] == ["Title"]
     assert [cell.content for cell in result.tables[0].cells] == ["Field", "Value"]
     assert result.tables[0].cells[0].spans[0].offset == 6
+    assert [cell.source_language for cell in result.tables[0].cells] == ["fr", "fr"]

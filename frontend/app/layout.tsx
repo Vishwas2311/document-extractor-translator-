@@ -13,14 +13,14 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     metadataBase: new URL(origin),
     title: "CareTranslate Studio | Youth Care Document Intelligence",
-    description: "Extract and translate Arabic and Mandarin youth-care documents into reviewable, page-wise English JSON.",
+    description: "Extract multilingual documents into reviewable, format-preserving financial data with English translation.",
     icons: {
       icon: "/favicon.svg",
       shortcut: "/favicon.svg",
     },
     openGraph: {
       title: "CareTranslate Studio",
-      description: "Arabic and Mandarin document extraction, English translation, and page-wise structured review.",
+      description: "Multilingual financial extraction, English translation, and provenance-aware structured review.",
       images: [{ url: previewImage, width: 1536, height: 1024, alt: "CareTranslate Studio document review workflow" }],
       type: "website",
     },

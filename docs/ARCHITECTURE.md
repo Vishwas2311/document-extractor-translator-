@@ -2,17 +2,17 @@
 
 - **System:** CareTranslate Studio
 
-- **Current phase:** POC
+- **Current phase:** P0/P1 local evaluation baseline; P2 Azure platform deferred
 
-- **Implementation baseline:** Git commit `14518cc`
+- **Implementation baseline:** Current uncommitted evaluation tree; verify revision before release
 
-- **Current architecture version:** `poc-1`
+- **Current architecture version:** `prd-local-4`
 
 - **Canonical schema version:** `1.0`
 
-- **Translation prompt version:** `translation-v2-table-aware`
+- **Translation prompt version:** `translation-v3-multilingual-format-aware`
 
-- **Last reviewed:** 2026-08-02
+- **Last reviewed:** 2026-08-06
 
 ## 1. Purpose and scope
 
@@ -22,6 +22,7 @@ This document explains **how** CareTranslate Studio works. It records the curren
 - Data-security options and approval gates: [DATA-SECURITY.md](./DATA-SECURITY.md)
 - Mandatory constraints: [RULES.md](./RULES.md)
 - Stable current snapshot: [MEMORY.md](./MEMORY.md)
+- Financial extraction contract and focused diagrams: [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md)
 
 Status terms:
 
@@ -32,12 +33,13 @@ Status terms:
 
 ## 2. System context
 
-### 2.1 Current POC context
+### 2.1 Implemented local evaluation context
 
 ```mermaid
 flowchart LR
     User["Local reviewer"] --> Studio["Vinext / React Studio"]
-    Studio -->|"HTTP / JSON"| API["FastAPI API"]
+    Studio -->|"Same-origin HTTP / JSON"| Proxy["Vinext server proxy"]
+    Proxy -->|"Server-held local bearer token"| API["FastAPI API"]
     API --> DB["SQLite metadata"]
     API --> Storage["Local artifact storage"]
     API --> Worker["In-process async worker"]
@@ -45,11 +47,13 @@ flowchart LR
     Worker --> AOAI["Azure OpenAI GPT-5-mini"]
 ```
 
-The POC assumes one local operator. It has no application identity, role, organization, or ownership boundary.
+The local baseline uses backend bearer-token authentication. It has no Entra identity, role/organization model, tenant isolation, assignment, or document ownership boundary; the development token is not production authorization.
 
 ### 2.2 Responsibility boundaries
 
 - **Browser:** File selection, polling, PDF rendering, overlays, review views, downloads
+
+- **Vinext server proxy:** Same-origin forwarding and server-only local bearer-token injection
 
 - **FastAPI:** Validation, lifecycle API, safe errors, orchestration entry points
 
@@ -63,7 +67,10 @@ The POC assumes one local operator. It has no application identity, role, organi
 
 - **Azure OpenAI:** Schema-constrained English translation
 
-Azure credentials are loaded by the backend only. The browser receives only `NEXT_PUBLIC_API_BASE_URL`.
+Azure credentials are loaded by the backend only. The browser receives only
+`NEXT_PUBLIC_API_BASE_URL`. The implemented Vinext route proxy injects the local backend bearer
+token from server-only `API_AUTH_TOKEN`; it is credential containment, not user authentication
+or object authorization.
 
 ## 3. Repository structure
 
@@ -90,14 +97,13 @@ document-intelligence-platform/
 ├── frontend/
 │   ├── app/                     # Studio UI, API client, demo, PDF renderer, types
 │   ├── build/                   # Hosting build plugin
-│   ├── db/                      # Unused D1 scaffold
 │   ├── examples/                # Template example, not product behavior
 │   ├── public/                  # PDF.js worker, CMaps, fonts, WASM, assets
 │   ├── tests/                   # Server-rendered HTML tests
 │   ├── worker/                  # Vinext/Cloudflare worker entry
 │   └── .openai/hosting.json     # Frontend hosting metadata
 ├── scripts/                     # Windows setup/start helpers
-├── docker-compose.yml           # POC API container
+├── docker-compose.yml           # Local evaluation API container
 └── README.md
 ```
 
@@ -112,7 +118,7 @@ Current responsibilities:
 - Start in a complete synthetic demo.
 - Upload one document using multipart form data.
 - Poll document metadata every 1.5 seconds for up to 240 attempts.
-- Load all page JSON concurrently after page count is available and processing reaches a terminal state.
+- Load page summaries first and fetch the current page JSON on demand.
 - Render real PDFs using PDF.js.
 - Render synthetic demo pages without a source PDF.
 - Scale polygons to the page dimensions.
@@ -125,15 +131,18 @@ Current limitations:
 
 - Real non-PDF source files are still passed to the PDF renderer after page results exist.
 - Browser refresh returns to the synthetic demo; active document identity is not routed or persisted.
-- No document list, ownership, delete, correction, approval, or review queue UI.
-- Service “Connected” and “Secure workspace” indicators are static.
-- `chatgpt-auth.ts`, D1 scaffolding, and example notes routes are not connected to the product.
+- Financial correction, reconstructed-table acceptance/rejection, approval/rejection, and append-only audit history are implemented. Translation/block correction, assignment, organization ownership, and a general review queue remain targets.
+- Service indicators report configuration presence only; they do not prove provider reachability.
+- `chatgpt-auth.ts` and template examples are not connected to the product.
 
 ### 4.2 API
 
 FastAPI is created in `backend/app/main.py`. At startup it builds a service container, initializes database tables, creates clients/services, starts the in-process worker, and enqueues non-terminal documents discovered in SQLite.
 
-Cross-origin access is configured from `FRONTEND_ORIGINS`. Credentials are disabled in CORS because current requests have no user authentication.
+Cross-origin access is configured from `FRONTEND_ORIGINS` for direct API clients. The browser UI
+uses the same-origin Vinext proxy; local document routes still validate a shared backend bearer
+token. This is a development boundary, not production Entra/object authorization. CORS
+credentials remain disabled because authentication is not cookie-based.
 
 Application exceptions are returned using safe messages and a request identifier. Unexpected exceptions return a generic 500 response and are logged server-side.
 
@@ -161,7 +170,7 @@ SQLAlchemy uses async sessions. SQLite enables foreign keys, WAL mode, and a fiv
 
 Document paths are resolved below one configured root. Document IDs cannot escape that root. JSON is written through a temporary file followed by atomic replacement.
 
-Local storage is a POC adapter. Production code should depend on the storage abstraction and use Blob Storage rather than local paths.
+Local storage is an evaluation adapter behind the artifact-storage protocol. Production code will use Blob Storage rather than local paths.
 
 ## 5. Processing sequence
 
@@ -190,8 +199,10 @@ sequenceDiagram
     Q->>DI: Analyze source with prebuilt-layout
     DI-->>Q: Pages, text, tables, languages, polygons
     Q->>FS: Write raw response
-    Q->>Q: Normalize canonical document
-    Q->>FS: Write extraction and preliminary page JSON
+    Q->>Q: Normalize immutable provider extraction
+    Q->>FS: Write provider extraction and preliminary page JSON
+    Q->>Q: Reconcile bounded aligned table columns
+    Q->>FS: Write versioned table-reconciliation evidence
     Q->>AI: Translate bounded structured batches
     AI-->>Q: ID-keyed translations
     Q->>Q: Validate IDs, order, empties, protected tokens
@@ -253,11 +264,15 @@ Configuration errors and service errors are converted to safe application errors
 
 Current gaps:
 
-- `AZURE_AUTH_MODE` is unused.
-- `AZURE_DOCUMENT_INTELLIGENCE_FEATURES` is unused; languages are hard-coded.
-- Managed identity is not implemented.
-- Analyze-result deletion is not called after retrieval.
-- The analyzer does not enforce an application page limit before service analysis.
+- API-key and managed-identity client construction are implemented, but managed-identity deployment
+  evidence and private-network enforcement are not established.
+- Language-span extraction is configurable; production configuration-drift evidence is not automated.
+- Analyze results are deleted immediately with `(model_id, result_id)` when the SDK returns an ID,
+  but deletion receipts, durable retry/alerting, and deployment evidence are not implemented.
+- Azure currently exposes no classifier-result deletion operation; selective-classifier retention
+  therefore remains an explicit production approval gate.
+- The upload boundary enforces PDF encryption and page-count limits, but malware scanning and
+  content-disarm controls remain production targets.
 
 ## 9. Canonical normalization
 
@@ -281,20 +296,20 @@ Confidence is a word-length-weighted mean for words overlapping the paragraph sp
 
 Tables receive IDs such as `t0001`; cells receive IDs such as `t0001-c0001`. Row/column positions, spans, kind, content, character spans, and regions are preserved.
 
-Table cells do not currently receive Azure language hints or OCR confidence through the mapper. Script-based language detection is applied later.
+Table cells receive Azure language hints by overlapping their spans with the provider language spans. OCR confidence is not currently mapped for cells. Language detection applies script fallbacks later when the provider returns no usable hint.
 
 ## 10. Language routing
 
-The language service combines Azure hints and Unicode script detection:
+The language service combines Azure language spans with conservative Unicode script fallbacks:
 
-- Arabic hints/scripts route to `ar`.
-- Chinese hints route to `zh-Hans` or `zh-Hant`.
-- Han script without a reliable hint defaults to `zh-Hans`.
-- Supported source plus Latin script routes to `mixed`.
-- Latin-only routes to `en`.
-- Content without a supported signal routes to `und`.
+- Any syntactically valid provider BCP 47 source tag is normalized and retained; it is not checked against an Arabic/Chinese allowlist.
+- Arabic hints/scripts normalize to `ar`; Chinese hints normalize to `zh-Hans` or `zh-Hant`.
+- Han script without a reliable hint defaults to `zh-Hans`; mixed Arabic/Han plus Latin routes to `mixed`.
+- A provider English hint normalizes to `en`. Latin script without a provider hint is `und`, because script alone cannot distinguish English, French, Spanish, and other languages.
+- `und`, invalid tags, and non-linguistic `zxx` values are not routed to Azure OpenAI. Alphabetic unknown-language content becomes `needs_review`; numeric-only content is copied without translation.
+- The mapper propagates provider language spans to paragraphs and table cells before batching.
 
-Production work must validate Simplified/Traditional routing, punctuation-only values, names, numeric-only table cells, and other languages encountered in real workflows.
+This removes source-language restrictions from application routing, not from production assurance. Every advertised language/document family still requires extraction, translation, protected-token, PII-detection, and reviewer-correction benchmarks before enablement.
 
 ## 11. Translation architecture
 
@@ -303,14 +318,15 @@ Text blocks and table cells are translated through the same stable-ID contract. 
 ### 11.1 Routing
 
 - Empty source: `not_required` with empty output.
-- Arabic/Chinese/mixed: `pending`, then translated.
+- Any valid detected non-English BCP 47 tag, including `mixed`: `pending`, then translated.
 - English: source copied to output with `not_required`.
-- Unknown: `needs_review` with a warning.
+- Unknown/invalid language with alphabetic content: `needs_review` with a warning and no silent language guess.
+- Non-linguistic content: copied with `not_required`.
 - Text confidence below 0.85: review flag and warning.
 
 ### 11.2 Batching and cache
 
-Default limits are 25 blocks and 12,000 source characters. A batch hash includes the prompt version and serialized request. If the matching translation artifact exists, its response is validated and reused. A changed prompt version or input changes the hash.
+Default limits are 40 blocks and 16,000 source characters, with up to 6 concurrent Azure OpenAI batch calls per document (`TRANSLATION_CONCURRENCY`). A batch hash includes the prompt version and serialized request. If the matching translation artifact exists, its response is validated and reused. A changed prompt version or input changes the hash.
 
 ### 11.3 Azure OpenAI call
 
@@ -369,6 +385,26 @@ The final document becomes `failed`, while preliminary pages remain readable. Th
 - Spans and bounding regions
 - Review flag and warnings
 
+### 13.4 Financial result
+
+`financial-result-1.4` adds an ordered `content_items` stream to the existing table/validation payload:
+
+- `heading`, `paragraph`, `key_value`, `list_item`, and `table` semantic types
+- Stable source IDs, reading order, source pages, language, source/translated text, translated key/value subfields, geometry, relevance, warnings, and review state
+- Table items reference the normalized table contract instead of flattening cells into narrative text
+- Deterministic financial text signals plus the nearest preceding contextual heading; unrelated narrative blocks are excluded
+- Source display text remains immutable; normalized values are separate derived fields
+- Cell-level semantic types distinguish monetary amounts from measurements, percentage ranges,
+  quantities, phones, dates/times, account numbers, identifiers, and unknown numeric values.
+  Only explicit monetary correction flags participate in financial approval.
+- Provider/effective table dimensions, cell origin, source-block IDs, integrity status, and
+  reconciliation candidate IDs remain explicit
+- Stored `financial-result-1.1` table-only artifacts remain readable in the frontend
+  compatibility path. Pre-1.4 normalized display is withheld until controlled reprocessing
+  creates 1.4 because the legacy artifact lacks semantic value types.
+
+
+
 Breaking contract changes require a schema-version increment, migration plan, compatibility statement, frontend type update, and tests.
 
 ## 14. Database model
@@ -402,6 +438,11 @@ storage/documents/{document-id}/
 ```
 
 Sensitive content appears in the source, raw response, normalized extraction, translated responses, pages, and exports. Local artifacts currently persist until explicit deletion.
+
+The financial artifact family additionally includes `classification/pages.json`,
+`normalized/table-reconciliation.json`, `normalized/financial.json`,
+`validation/financial.json`, and financial JSON/CSV/XLSX exports. The reconciliation artifact is
+derived evidence; it does not replace `normalized/extracted.json`.
 
 Production Blob paths must include an organization boundary, document ID, immutable result version, artifact kind, and retention metadata. Access should use short-lived authorized service operations rather than public URLs.
 
@@ -446,18 +487,30 @@ Base prefix: `/api/v1`
    - **Current purpose:** Canonical page JSON with ETag
 
 10. **Method:** GET
-   - **Route:** `/documents/{id}/downloads/{artifact}`
-   - **Current purpose:** Page, extracted, or bilingual JSON
+   - **Route:** `/documents/{id}/classification`, `/documents/{id}/financial-result`,
+     `/documents/{id}/financial-validation`, `/documents/{id}/table-reconciliation`,
+     `/documents/{id}/financial-reviews`
+   - **Current purpose:** Manifest-gated financial results, evidence, validation, and review history
 
 11. **Method:** POST
+   - **Route:** `/documents/{id}/financial-reviews`
+   - **Current purpose:** Append a result-hash-bound correction, structure decision, and approval/rejection
+
+12. **Method:** GET
+   - **Route:** `/documents/{id}/downloads/{artifact}`
+   - **Current purpose:** Page/extracted/bilingual/financial JSON and financial CSV/XLSX
+
+13. **Method:** POST
    - **Route:** `/documents/{id}/retry`
    - **Current purpose:** Basic retry
 
-12. **Method:** DELETE
+14. **Method:** DELETE
    - **Route:** `/documents/{id}`
    - **Current purpose:** Delete a terminal document and metadata
 
-All current routes are unauthenticated. Production must authorize every document route and avoid revealing deployment information to unauthorized callers.
+Document routes currently require the configured local bearer token. Production must replace
+this shared development credential with Entra identity, tenant/object authorization, and
+permission-filtered operational metadata.
 
 ## 17. Error and recovery model
 
@@ -522,7 +575,7 @@ Current risks:
 
 ### 18.1 Current sensitive-data copies and trust boundaries
 
-The current POC crosses two external managed-service boundaries and creates multiple local copies. This is acceptable only for synthetic or explicitly approved de-identified test data.
+The current local baseline crosses two external managed-service boundaries and creates multiple local copies. This is acceptable only for synthetic or explicitly approved de-identified test data.
 
 1. **Stage:** Browser upload/review
    - **Content exposed or stored:** Original file, page image, extracted and translated text
@@ -547,7 +600,7 @@ The current POC crosses two external managed-service boundaries and creates mult
    - **Content exposed or stored:** Full extracted source text in translation batches and
      generated English
    - **Current boundary:** Azure managed service
-   - **Production requirement:** Synthetic POC only; production normally receives only approved
+   - **Production requirement:** Synthetic local evaluation only; production normally receives only approved
      minimized/pseudonymized blocks, with raw content prohibited without `GENAI_RAW_EXCEPTION`
 
 5. **Stage:** Metadata/logging
@@ -560,12 +613,12 @@ The current POC crosses two external managed-service boundaries and creates mult
 
 The server-side policy gateway must select the route before any content crosses an external boundary:
 
-1. **Profile:** `POC_SYNTHETIC`
+1. **Profile:** `GENAI_SYNTHETIC_POC` (persisted compatibility identifier)
    - **Extraction route:** Current Azure Document Intelligence
    - **Translation route:** Current Azure OpenAI
    - **Generative LLM exposure:** Yes; raw extracted non-English blocks may be submitted
    - **Permitted use:** Synthetic or explicitly approved de-identified testing only
-   - **Status:** Current POC constraint
+   - **Status:** Current local-evaluation constraint
 
 2. **Profile:** `GENAI_PSEUDONYMIZED`
    - **Extraction route:** Regional/private Document Intelligence with immediate result deletion
@@ -620,11 +673,12 @@ The full control set is in [DATA-SECURITY.md](./DATA-SECURITY.md).
 ### Local Windows
 
 - `scripts/setup.ps1` creates environment files, Python virtual environment, installs dependencies, and runs `npm ci`.
-- `scripts/run-poc.ps1` opens backend and frontend PowerShell processes.
+- `scripts/run-local.ps1` opens backend and frontend PowerShell processes;
+  `run-poc.ps1` is a deprecated compatibility shim only.
 - FastAPI listens on `127.0.0.1:8000` with reload.
 - Vinext listens on `localhost:3000`.
 
-### POC Docker
+### Local evaluation Docker
 
 Docker Compose builds only the API, maps port 8000, reads `backend/.env`, and mounts local `data` and `storage`. The image runs one Uvicorn worker.
 
@@ -637,6 +691,8 @@ There is no CI/CD, infrastructure as code, automated migration job, production i
 ## 20. Production target architecture
 
 The managed platform components are the production target. The profile-based provider routing below is the proposed security refinement and remains subject to the approvals in `DATA-SECURITY.md`.
+
+**Backend architecture (API platform — sellable without UI):** [diagrams/README.md](./diagrams/README.md) · [diagrams/multilingual-translator-studio-backend-architecture.png](./diagrams/multilingual-translator-studio-backend-architecture.png)
 
 ```mermaid
 flowchart TB
@@ -962,24 +1018,24 @@ Production delivery requires:
 
 ## 26. Known implementation gaps
 
-1. Authentication helper exists but is unused; backend is unauthenticated.
-2. Live image preview does not match accepted image formats.
-3. In-memory queue, local storage, and SQLite are POC-only.
-4. Job leases/heartbeats/stage tracking and `JOB_LEASE_SECONDS` are incomplete.
-5. Translation-batch database records and token accounting are unused.
-6. `AZURE_AUTH_MODE` and configurable Document Intelligence features are unused.
-7. Health readiness is mostly static.
-8. Retry is cache-aware but has no explicit mode or immutable result version.
-9. Preliminary extraction page status remains `normalizing` after translation failure.
-10. No correction, approval, assignment, or audit workflow exists.
-11. No retention automation or Azure analyze-result deletion exists.
-12. No CI/CD or complete backend production deployment exists.
-13. Frontend contains unused D1/example scaffolding and repeated CSS overrides.
-14. Python dependencies are range-based without a reproducible lock.
-15. Current Next.js dependency requires security upgrade and retesting.
-16. No data classification, server-side processing-policy gateway, profile authorization, or fail-closed provider routing exists.
-17. No Azure AI Translator or Document Intelligence/Translator container adapter exists.
-18. No Data Security Gateway, multilingual PII detector, deterministic tokenization service, or separately protected token-map boundary exists.
+1. The shared local bearer-token boundary is not Entra authentication, tenant isolation, RBAC, or
+   object-level authorization.
+2. Live image preview does not yet match every accepted input format.
+3. In-process workers, local storage, and SQLite are local-evaluation components only.
+4. Distributed queue delivery, dead-lettering, cancellation, and multi-worker recovery are not
+   implemented on Azure infrastructure.
+5. Health reports configuration plus local DB/storage/worker readiness; it does not actively probe
+   paid Azure providers. The UI now labels that state as “Configured,” not “Available.”
+6. Managed-identity and private-network configuration lack deployed evidence and drift enforcement.
+7. Financial correction and approval are implemented locally; general translation correction,
+   assignment, tenant authorization, and reviewed-export materialization remain targets.
+8. Analyze-result deletion is best-effort and immediate for document-model results, without durable
+   receipts/retry/alerting; Azure has no classifier-result deletion operation.
+9. Retention automation, legal hold, quarantine, malware scanning, and deletion evidence are absent.
+10. No repository CI/CD, SBOM/container gate, or complete Azure production deployment exists.
+11. The lightweight pseudonymization gateway is not an approved multilingual PII detector or
+    separately protected production token-map service.
+12. No Azure AI Translator or Document Intelligence/Translator container adapter exists.
 19. Private endpoints, managed identity enforcement, egress restrictions, allowed-region/deployment policy, and modified-abuse-monitoring verification are not implemented.
 
 ## 27. Architecture decision records
@@ -1001,12 +1057,46 @@ Initial ADR candidates:
 - Generative-AI exception and pseudonymization boundary, if management permits the exception.
 - Frontend hosting and same-origin/API strategy.
 
-## 28. References
+## 28. Financial-only extraction architecture increment
+
+**Implemented:** financial extraction is an additive stage around the existing canonical mapper. `post_extract` keeps the original full-layout behavior and derives a classification manifest with deterministic layout rules. `selective` uses the same Document Intelligence client boundary to call a configured custom classifier, converts its page ranges into conservative decisions, groups selected pages into bounded contiguous ranges, and reuses the existing stable-ID range extractor.
+
+```mermaid
+flowchart LR
+    Source["Immutable source"] --> Policy["Existing backend profile decision"]
+    Policy --> Mode{"Stored financial mode"}
+    Mode -->|"post_extract - full-layout evaluation"| Layout["Full layout extraction"]
+    Layout --> Provider["Immutable provider extraction"]
+    Mode -->|"selective"| Classifier["Azure DI custom classifier"]
+    Classifier --> Selector["Recall-first candidate selector"]
+    Selector --> Ranges["Selected contiguous page ranges"]
+    Ranges --> LayoutSelected["Detailed layout extraction"]
+    LayoutSelected --> Provider
+    Provider --> Reconcile["Versioned aligned-column reconciliation"]
+    Reconcile -->|post_extract| Rules["Deterministic financial page rules"]
+    Reconcile -->|selective| Normalize["Contextual financial normalization and validation"]
+    Rules --> Normalize
+    Normalize --> Project["Ordered financial-only semantic projection"]
+    Project --> Results["Versioned JSON, CSV, XLSX and page index"]
+    Results --> UI["Page-scoped source / English review UI"]
+    UI --> Decision["Corrections + structure accept/reject + result-hash audit"]
+```
+
+Artifacts are stored under `classification/`, `normalized/`, `validation/`, and `exports/`.
+`normalized/extracted.json` is immutable provider output; the separate
+`normalized/table-reconciliation.json` records derived structural evidence. SQLite summary
+columns and append-only financial correction/structure reviews are Alembic-managed in the local
+baseline. Blob, Service Bus, PostgreSQL, Entra tenant authorization, private networking, and
+malware scanning remain P2 targets. See [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md) for
+table integrity, review, reprocess, and experiment diagrams.
+
+## 29. References
 
 - [Product requirements](./PRD.md)
 - [Data security and AI processing plan](./DATA-SECURITY.md)
 - [Rules](./RULES.md)
 - [Memory](./MEMORY.md)
+- [Financial extraction engine](./FINANCIAL-EXTRACTION.md)
 - Project root `README.md`
 - [Azure Document Intelligence data, privacy, and security](https://learn.microsoft.com/en-us/azure/foundry/responsible-ai/document-intelligence/data-privacy-security)
 - [Azure OpenAI data, privacy, and security](https://learn.microsoft.com/en-us/azure/foundry/responsible-ai/openai/data-privacy)

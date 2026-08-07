@@ -35,6 +35,9 @@ class TableCell(BaseModel):
     kind: str | None = None
     spans: list[Span] = Field(default_factory=list)
     bounding_regions: list[BoundingRegion] = Field(default_factory=list)
+    origin: Literal["provider", "reconstructed"] = "provider"
+    source_block_ids: list[str] = Field(default_factory=list)
+    reconciliation_candidate_id: str | None = None
 
 
 class TableResult(BaseModel):
@@ -43,6 +46,10 @@ class TableResult(BaseModel):
     column_count: int
     cells: list[TableCell] = Field(default_factory=list)
     bounding_regions: list[BoundingRegion] = Field(default_factory=list)
+    provider_row_count: int | None = None
+    provider_column_count: int | None = None
+    integrity_status: Literal["provider", "reconciled", "suspected_incomplete"] = "provider"
+    reconciliation_candidate_id: str | None = None
 
 
 class TextBlock(BaseModel):

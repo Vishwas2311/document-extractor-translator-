@@ -1,4 +1,6 @@
+import asyncio
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -7,6 +9,13 @@ from sqlalchemy import text
 from app.core.auth import AuthPrincipal, optional_principal, require_principal
 
 router = APIRouter()
+
+
+def _probe_storage(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    probe = root / ".ready_probe"
+    probe.write_text("ok", encoding="utf-8")
+    probe.unlink(missing_ok=True)
 
 
 @router.get("/health")
@@ -32,11 +41,7 @@ async def readiness(request: Request) -> JSONResponse:
         overall = "not_ready"
 
     try:
-        root: Path = settings.storage_root
-        root.mkdir(parents=True, exist_ok=True)
-        probe = root / ".ready_probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        await asyncio.to_thread(_probe_storage, settings.storage_root)
     except Exception:
         storage_status = "unavailable"
         overall = "not_ready"
@@ -53,6 +58,14 @@ async def readiness(request: Request) -> JSONResponse:
         "auth_required": settings.auth_required,
         "default_processing_profile": settings.default_processing_profile,
         "default_data_class": settings.default_data_class,
+        "limits": {
+            "max_upload_size_mb": settings.max_upload_size_mb,
+            "max_document_pages": settings.max_document_pages,
+            "di_page_range_size": settings.di_page_range_size,
+            "di_range_concurrency": settings.di_range_concurrency,
+            "translation_concurrency": settings.translation_concurrency,
+            "job_poll_timeout_minutes": 90,
+        },
         "azure_configured": {
             "document_intelligence": settings.document_intelligence_configured,
             "openai": settings.azure_openai_configured,
@@ -66,7 +79,7 @@ async def readiness(request: Request) -> JSONResponse:
 @router.get("/health/dependencies")
 async def dependency_configuration(
     request: Request,
-    _: AuthPrincipal = Depends(require_principal),
+    _: Annotated[AuthPrincipal, Depends(require_principal)],
 ) -> dict[str, object]:
     settings = request.app.state.container.settings
     return {
@@ -86,6 +99,11 @@ async def dependency_configuration(
             "default_data_class": settings.default_data_class,
             "allow_synthetic_raw_llm": settings.allow_synthetic_raw_llm,
             "genai_raw_exception_enabled": settings.genai_raw_exception_enabled,
+            "financial_extraction_mode": settings.financial_extraction_mode,
+            "financial_classifier_configured": bool(
+                settings.financial_classifier_model_id
+            ),
+            "financial_classifier_version": settings.financial_classifier_version,
         },
     }
 
@@ -93,7 +111,7 @@ async def dependency_configuration(
 @router.get("/health/session")
 async def session_status(
     request: Request,
-    principal: AuthPrincipal | None = Depends(optional_principal),
+    principal: Annotated[AuthPrincipal | None, Depends(optional_principal)],
 ) -> dict[str, object]:
     settings = request.app.state.container.settings
     return {
@@ -101,6 +119,8 @@ async def session_status(
         and (not settings.auth_required or principal.subject != "anonymous-dev"),
         "auth_required": settings.auth_required,
         "subject": principal.subject if principal else None,
+        "organization_id": principal.organization_id if principal else None,
+        "roles": sorted(principal.roles) if principal else [],
         "security_label": (
             "Authenticated local API token"
             if principal and settings.auth_required

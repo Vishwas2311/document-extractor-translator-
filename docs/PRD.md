@@ -2,11 +2,11 @@
 
 - **Product:** CareTranslate Studio
 
-- **Phase:** Runnable POC with an approved production roadmap
+- **Phase:** P0/P1 local evaluation baseline; P2 Azure platform deferred until experiment evidence
 
-- **Implementation baseline:** Git commit `14518cc`
+- **Implementation baseline:** Current uncommitted evaluation tree; verify revision before release
 
-- **Last reviewed:** 2026-08-02
+- **Last reviewed:** 2026-08-06
 
 - **Product owner:** To be assigned
 
@@ -14,12 +14,13 @@
 
 ## 1. Purpose
 
-This PRD defines the product problem, users, scope, current POC behavior, production requirements, success measures, and release boundaries for CareTranslate Studio. It is the source of truth for **what** the product must do and **why**.
+This PRD defines the product problem, users, implemented local evaluation behavior, production requirements, success measures, and release boundaries for CareTranslate Studio. It is the source of truth for **what** the product must do and **why**.
 
 - Implementation design belongs in [ARCHITECTURE.md](./ARCHITECTURE.md).
 - The manager-facing processing options, security controls, and approval gates belong in [DATA-SECURITY.md](./DATA-SECURITY.md).
 - Mandatory engineering and safety constraints belong in [RULES.md](./RULES.md).
 - Stable current facts and decisions belong in [MEMORY.md](./MEMORY.md).
+- The financial extraction implementation contract and diagrams belong in [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md).
 
 ### Requirement status
 
@@ -32,7 +33,7 @@ Status labels must be updated when behavior changes. Proposed features must neve
 
 ## 2. Product summary
 
-CareTranslate Studio is a human-in-the-loop document intelligence workspace for youth-care teams. It accepts Arabic and Chinese documents, extracts text and layout, translates eligible content into English, preserves page and table context, and presents synchronized source and result views for review and export. The current synthetic-only POC uses Azure Document Intelligence and Azure OpenAI. Azure OpenAI remains a planned production component for translation and future approved features, but the backend must select an approved data-security profile first. The normal Azure OpenAI-enabled route sends only the minimum pseudonymized content; raw confidential or restricted content is prohibited by default.
+CareTranslate Studio is a human-in-the-loop document intelligence workspace for youth-care teams. It accepts multilingual documents, extracts text and layout, translates eligible content into English, preserves page and source-format context, and presents synchronized financial review and export views. The current synthetic-only local baseline uses Azure Document Intelligence and Azure OpenAI. Azure OpenAI remains a planned production component for translation and future approved features, but the backend must select an approved data-security profile first. The normal Azure OpenAI-enabled route sends only the minimum pseudonymized content; raw confidential or restricted content is prohibited by default.
 
 The product accelerates initial understanding and structured review. It does not make clinical, safeguarding, eligibility, legal, or care decisions. Machine extraction and translation remain subject to human verification.
 
@@ -64,9 +65,9 @@ The product must provide assistance without presenting uncertain output as verif
 
 ## 5. Users and roles
 
-### Current POC
+### Current local evaluation baseline
 
-The POC has one implicit local user. It has no application authentication, authorization, tenant isolation, or document-ownership enforcement.
+The local baseline has backend bearer-token authentication but no Entra identity, organization model, tenant isolation, assignment, or document-ownership authorization. Its token gate is a development containment control, not production RBAC.
 
 ### Production roles
 
@@ -95,10 +96,10 @@ Backend authorization is mandatory. Hiding frontend controls is not authorizatio
 
 ## 6. Goals
 
-### POC goals
+### Local evaluation goals
 
 - Demonstrate page, paragraph, table, language, geometry, and confidence extraction.
-- Demonstrate English translation of Arabic and Chinese content.
+- Demonstrate language-agnostic routing of valid detected non-English language tags to English translation, with unknown language routed to review.
 - Demonstrate stable IDs and schema-constrained translation responses.
 - Demonstrate synchronized source overlays and result cards.
 - Produce page-wise JSON and complete extracted/bilingual exports.
@@ -135,18 +136,17 @@ CareTranslate Studio does not:
 
 ### File formats
 
-Target formats are PDF, PNG, JPEG/JPG, TIFF/TIF (including multi-page TIFF), and BMP. The backend currently accepts all of them. Reliable live preview currently works for PDF only; image preview is a production requirement and a POC gap.
+Target formats are PDF, PNG, JPEG/JPG, TIFF/TIF (including multi-page TIFF), and BMP. The backend currently accepts all of them. Reliable live preview currently works for PDF only; image preview is a production requirement and a local-baseline gap.
 
 ### Languages
 
-- Arabic (`ar` and regional hints)
-- Simplified Chinese (`zh-Hans`)
-- Traditional Chinese (`zh-Hant`)
-- Mixed Arabic/Chinese and English content
-- English retained without translation
-- Unknown language routed to review
+- **Implemented routing contract:** Azure Document Intelligence language spans supply a BCP 47 tag. Any syntactically valid detected non-English tag is eligible for the Azure OpenAI English-translation route; English is retained without translation.
+- **Implemented script fallbacks:** Arabic and Han scripts are recognized when a provider hint is absent. Latin-script text without a provider hint is not guessed as English.
+- **Implemented safety behavior:** `und`, invalid, and low-confidence language outcomes are not silently translated or passed through; they remain review-required.
+- **Current automated fixtures:** Arabic, Simplified/Traditional Chinese routing, French, Hindi, Russian, Spanish, mixed text, English, numeric-only content, and unknown language.
+- **Production constraint:** source-language routing is not the same as proven translation quality. Each advertised language and document family requires approved extraction, translation, protected-token, PII-detection, and reviewer-correction benchmarks before production enablement.
 
-Use **Chinese** in product and technical documentation. “Mandarin” is not sufficient as the only label for written Simplified and Traditional Chinese. Traditional Chinese routing requires broader validation before production.
+Use **Chinese**, **Simplified Chinese**, or **Traditional Chinese** for written-language labels. “Mandarin” is not sufficient as the only written-language label.
 
 English is the only approved target language. Adding another target language requires a PRD, schema, prompt, UI, benchmark, and security review.
 
@@ -160,7 +160,7 @@ English is the only approved target language. Adding another target language req
 4. Source-region hover and selection synchronize with result cards.
 5. Synthetic JSON can be downloaded.
 
-### Process a document in the POC
+### Process a document in local evaluation
 
 1. The local user uploads or drops one accepted file.
 2. The backend validates extension, size, signature, and extension/signature agreement.
@@ -267,8 +267,8 @@ English is the only approved target language. Adding another target language req
 ### Language and translation
 
 1. **ID:** FR-020
-   - **Requirement:** Route supported Arabic, Chinese, and mixed content to English translation.
-   - **Status:** Partially implemented
+   - **Requirement:** Route any valid detected non-English BCP 47 source language, including mixed content, to English translation without a hard-coded source-language allowlist.
+   - **Status:** Partially implemented — generic routing and structured translation are implemented; production quality/security approval remains language- and document-family-specific
 
 2. **ID:** FR-021
    - **Requirement:** Preserve existing English without unnecessary translation.
@@ -324,7 +324,7 @@ English is the only approved target language. Adding another target language req
 
 4. **ID:** FR-033
    - **Requirement:** Support block/cell corrections with reasons.
-   - **Status:** Production target
+   - **Status:** Partially implemented — financial-cell corrections are append-only; translation/block corrections and object authorization remain targets
 
 5. **ID:** FR-034
    - **Requirement:** Support Draft, Needs review, In review, Approved, and Rejected.
@@ -332,7 +332,7 @@ English is the only approved target language. Adding another target language req
 
 6. **ID:** FR-035
    - **Requirement:** Record reviewer, timestamp, comment, correction, and decision.
-   - **Status:** Production target
+   - **Status:** Partially implemented — financial reviewer, timestamp, note, correction, decision, processing version and result hash are persisted
 
 7. **ID:** FR-036
    - **Requirement:** Never present machine output as certified without a separate approved
@@ -372,6 +372,18 @@ English is the only approved target language. Adding another target language req
 8. **ID:** FR-047
    - **Requirement:** Resume an authorized document after browser reload.
    - **Status:** Production target
+9. **ID:** FR-048
+   - **Requirement:** Present financial-only results as one ordered document stream that preserves headings, paragraphs, key-values, list items, table grids/spans, source pages, source text, translations, and separate normalized values.
+   - **Status:** Implemented in `financial-result-1.4` with compatibility for stored table-only 1.1 results
+
+10. **ID:** FR-049
+   - **Requirement:** Preserve the immutable Document Intelligence table result while allowing
+     a separately versioned effective table to join only complete, row-aligned orphan columns;
+     retain source-block provenance and require explicit reviewer acceptance or rejection.
+   - **Status:** Implemented for the bounded `aligned-orphan-columns-1.0` policy; broader
+     continuation-table merging remains corpus-gated
+
+
 
 ### Retry and recovery
 
@@ -389,11 +401,11 @@ English is the only approved target language. Adding another target language req
 
 4. **ID:** FR-053
    - **Requirement:** Provide **Reprocess completely** as a fresh version.
-   - **Status:** Production target
+   - **Status:** Partially implemented — derived artifacts are fail-closed invalidated; immutable multi-version result materialization remains a target
 
 5. **ID:** FR-054
    - **Requirement:** Never silently overwrite an approved result.
-   - **Status:** Production target
+   - **Status:** Partially implemented — approved financial results block reprocess; full-document approved-version handling remains a target
 
 6. **ID:** FR-055
    - **Requirement:** Recover safely after worker/service restart.
@@ -419,7 +431,7 @@ English is the only approved target language. Adding another target language req
 
 5. **ID:** FR-064
    - **Requirement:** Provide CSV/XLSX when structured tables exist.
-   - **Status:** Production target
+   - **Status:** Partially implemented — financial table CSV/XLSX is implemented; reviewed-result materialization and general table export remain targets
 
 6. **ID:** FR-065
    - **Requirement:** Provide an audit manifest with hashes and processing/review metadata.
@@ -573,7 +585,7 @@ English is the only approved target language. Adding another target language req
    - **Status:** Production target
 
 10. **Control ID:** NFR-SEC-10
-   - **Control area:** POC data
+   - **Control area:** Local evaluation data
    - **Product requirement:** Do not use real youth records until formal approval
    - **LLM exposure effect:** Current raw Azure OpenAI route remains synthetic/de-identified
      only
@@ -711,11 +723,11 @@ These targets are provisional until representative benchmarking:
 
 ## 12. Retention decisions
 
-### POC
+### Local evaluation baseline
 
 - Synthetic or formally anonymized documents only.
 - Delete test documents after the demonstration or test cycle.
-- The POC is not an approved system of record.
+- The local baseline is not an approved system of record.
 
 ### Production default
 
@@ -746,9 +758,9 @@ These defaults are product decisions, not a claim of legal sufficiency. Records,
 
 Maintain synthetic approved fixtures for:
 
-- Clear/degraded Arabic scans.
-- Simplified and Traditional Chinese.
-- Mixed English/Arabic/Chinese.
+- Clear/degraded scans across every proposed production source language.
+- Arabic and right-to-left text; Simplified and Traditional Chinese; Latin, Cyrillic, and Indic-script fixtures.
+- Mixed-language text, English pass-through, numeric-only content, invalid tags, and unknown-language review routing.
 - Tables, headers, merged cells, and multi-page tables.
 - Rotation, unusual page sizes, handwriting, and low confidence.
 - Multi-page PDF/TIFF and PNG/JPEG/BMP preview.
@@ -779,7 +791,7 @@ No real youth record may enter the shared test suite.
      incident response
 
 5. **Risk:** Raw content reaches a generative LLM without approval
-   - **Current mitigation:** POC synthetic-only restriction
+   - **Current mitigation:** Local-baseline synthetic-only restriction
    - **Production requirement:** Default-deny policy engine, egress allowlist, profile-negative
      tests, alerts
 
@@ -812,7 +824,7 @@ No real youth record may enter the shared test suite.
    - **Production requirement:** Durable queue, leases, idempotency, managed persistence
 
 12. **Risk:** Misleading assurance
-   - **Current mitigation:** README POC boundary
+   - **Current mitigation:** README local-evaluation boundary
    - **Production requirement:** Live status and approved UI language
 
 13. **Risk:** Dependency vulnerability
@@ -821,7 +833,7 @@ No real youth record may enter the shared test suite.
 
 ## 16. Release gates
 
-### POC
+### Local evaluation baseline
 
 - Synthetic demo works without credentials.
 - Configured backend/frontend quality checks pass.
@@ -855,7 +867,7 @@ No real youth record may enter the shared test suite.
 
 ## 17. Roadmap
 
-### Phase 1 — Stabilize the POC
+### Phase 1 — Stabilize the local evaluation baseline
 
 - Make all quality checks green and add CI.
 - Upgrade affected dependencies.
@@ -896,11 +908,11 @@ No real youth record may enter the shared test suite.
 
 ## 18. Approved decisions
 
-1. Documentation covers current POC and production roadmap.
+1. Documentation covers the implemented local baseline and production roadmap.
 2. Production roles are caseworker, translation reviewer, organization administrator, compliance auditor, and platform operator.
-3. Real youth records are prohibited in the POC.
+3. Real youth records are prohibited in the local baseline.
 4. Jurisdiction is deployment-specific and a production release blocker.
-5. Simplified and Traditional Chinese are in scope.
+5. English is the only target language; production-enabled source languages are controlled by approved language/document-family benchmark gates, not by a hard-coded application allowlist.
 6. Every advertised format must ultimately have reliable preview.
 7. Workspace retention defaults to 30 days with an approved 1–90 day range.
 8. Retry modes are Resume, Retranslate, and Reprocess completely.
@@ -915,6 +927,59 @@ No real youth record may enter the shared test suite.
 - Deploying organization, jurisdiction, lawful basis, consent, safeguarding, residency, and data-subject policy.
 - Approved Azure region and deployment types.
 - Whether Microsoft-managed regional Document Intelligence and Translator processing is permitted for each classification and jurisdiction.
+
+### 19.1 Financial-only extraction increment
+
+#### Implemented local capability
+
+- Generate a page-level financial classification manifest for every enabled document.
+- Preserve original source page numbers, geometry, table coordinates, raw values, normalized values, processing provenance, and ordered semantic formats for financial headings, paragraphs, key-values, list items, and tables.
+- Normalize financial amounts with decimal arithmetic and flag ambiguous separators.
+- Validate selected pages without financial content, duplicate cell coordinates, ambiguous numeric formats, and mixed explicit currencies.
+- Translate financial content present on selected financial/uncertain pages from any valid detected non-English language tag; numeric-only cells remain unchanged and unknown language is review-required.
+- Present an ordered source/English financial document view plus Financial, Review, and All page modes; export financial JSON, formula-safe CSV, and XLSX.
+
+#### Production acceptance requirements
+
+1. `selective` mode MUST use a versioned, approved Azure Document Intelligence custom classifier and MUST fail closed when its ID or policy approval is unavailable.
+2. Unknown or low-confidence pages MUST be selected for extraction and review; precision optimization MUST NOT silently reduce the approved recall threshold.
+3. The release corpus MUST include representative synthetic/de-identified 100–200-page PDFs, scanned pages, mixed document bundles, continuation tables, ambiguous units, and multilingual labels.
+4. Page-recall, table/cell accuracy, numeric-preservation, latency, and cost gates MUST be approved per supported document family before production use.
+5. `post_extract` is a full-layout evaluation fallback and MUST NOT be represented as cost-selective extraction.
+6. Financial reviewer corrections and approvals are partially implemented as append-only records bound to the exact processing version and result hash. Entra identity, object authorization, assignment, reviewed-export materialization, and production audit evidence remain P2/P3 targets.
+
+#### P0/P1 implementation acceptance
+
+- Locale-safe amount parsing never emits a normalized guess for ambiguous single-separator values.
+- Only ambiguous monetary values are normalization-review blockers; measurements, percentage
+  ranges, phone numbers, dates, account numbers, identifiers, and quantities remain source data.
+- The approval API rejects corrections for cells that are not explicitly marked as correctable
+  monetary values.
+- Spreadsheet formula neutralization applies to raw and normalized values.
+- Financial evidence above the include threshold cannot be suppressed by competing non-financial evidence.
+- Empty selection completes with valid empty financial artifacts and exports.
+- Reprocess invalidates the manifest before deleting every derived artifact family.
+- Resume, Retranslate, and Reprocess are all prohibited after financial approval; unapproved
+  retries adopt the current persisted processing contract.
+- Provider tables remain atomic across page-selection boundaries.
+- Provider extraction remains immutable; a separate `table-reconciliation-1.0` artifact records
+  every reconstructed candidate, source block, evidence score, policy fingerprint, and proposed
+  dimension change.
+- Reconstructed cells retain source block IDs and geometry, are visually distinguished, and
+  keep the result in review until the active candidate is explicitly accepted or rejected.
+- The shared yen/yuan symbol uses explicit page currency evidence when available and otherwise
+  remains currency-ambiguous; it is never silently labeled JPY or CNY.
+- Financial review history is append-only and bound to the active result SHA-256.
+- Financial approval cannot clear an independent OCR or translation review requirement.
+- The ordered financial content stream preserves headings, paragraphs, key-values, list items, and provider table grids in source reading order.
+- Non-financial narrative blocks are excluded deterministically; the nearest preceding heading is retained only as context for a financial signal or table.
+- The source view never replaces source text with a normalized value; normalization is shown as separate derived provenance.
+- Legacy `financial-result-1.1` table-only artifacts remain readable, while reprocessing emits `financial-result-1.4`.
+
+Detailed contracts and diagrams: [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md).
+
+### 19.2 Remaining organization decisions
+
 - Approval of the proposed default: no raw confidential or restricted content to a generative LLM.
 - Approval of `GENAI_PSEUDONYMIZED` as the normal Azure OpenAI-enabled route and the exact data classes/jurisdictions permitted to use it.
 - Whether a `GENAI_RAW_EXCEPTION` may ever exist and, if so, who can approve it and which narrowly defined purposes can qualify.

@@ -4,6 +4,7 @@ from enum import StrEnum
 class DocumentStatus(StrEnum):
     UPLOADED = "uploaded"
     QUEUED = "queued"
+    CLASSIFYING = "classifying"
     EXTRACTING = "extracting"
     NORMALIZING = "normalizing"
     TRANSLATING = "translating"
@@ -17,6 +18,7 @@ class DocumentStatus(StrEnum):
 
 class ProcessingStage(StrEnum):
     QUEUED = "queued"
+    CLASSIFICATION = "classification"
     EXTRACTION = "extraction"
     NORMALIZATION = "normalization"
     TRANSLATION = "translation"
@@ -78,3 +80,32 @@ class RetryMode(StrEnum):
     RESUME = "resume"
     RETRANSLATE = "retranslate"
     REPROCESS = "reprocess"
+
+
+class FinancialPageDisposition(StrEnum):
+    """Backend decision describing how a source page is processed."""
+
+    FINANCIAL = "financial"
+    NON_FINANCIAL = "non_financial"
+    UNCERTAIN = "uncertain"
+
+
+class FinancialReviewDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class DocumentReviewStatus(StrEnum):
+    """Human workflow status (orthogonal to machine DocumentStatus)."""
+
+    DRAFT = "draft"
+    NEEDS_REVIEW = "needs_review"
+    IN_REVIEW = "in_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class AssignmentStatus(StrEnum):
+    UNASSIGNED = "unassigned"
+    ASSIGNED = "assigned"
+    CLAIMED = "claimed"

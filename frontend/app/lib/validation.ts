@@ -5,6 +5,9 @@ import type {
   DocumentListResponse,
   DocumentStatus,
   DocumentSummary,
+  FinancialResult,
+  FinancialReviewHistory,
+  FinancialReviewRecord,
   HealthStatus,
   PageResult,
   PageSummary,
@@ -12,6 +15,8 @@ import type {
   TableCell,
   TableResult,
   TextBlock,
+  TranslationReviewHistory,
+  TranslationReviewRecord,
 } from "../types";
 
 // Runtime guards for API responses. The backend schema can drift from these types
@@ -24,6 +29,7 @@ import type {
 const DOCUMENT_STATUSES = new Set<DocumentStatus>([
   "queued",
   "uploaded",
+  "classifying",
   "extracting",
   "normalizing",
   "translating",
@@ -174,6 +180,76 @@ export function isPageSummary(value: unknown): value is PageSummary {
   );
 }
 
+export function isFinancialResult(value: unknown): value is FinancialResult {
+  return (
+    isObject(value) &&
+    isString(value.schema_version) &&
+    isString(value.document_id) &&
+    isString(value.processing_version) &&
+    isFiniteNumber(value.source_page_count) &&
+    Array.isArray(value.selected_pages) &&
+    value.selected_pages.every(isFiniteNumber) &&
+    Array.isArray(value.uncertain_pages) &&
+    value.uncertain_pages.every(isFiniteNumber) &&
+    Array.isArray(value.tables) &&
+    Array.isArray(value.reconciliation_candidate_ids) &&
+    value.reconciliation_candidate_ids.every(isString) &&
+    (value.content_items === undefined || Array.isArray(value.content_items)) &&
+    isObject(value.validation) &&
+    isFiniteNumber(value.validation.issue_count) &&
+    Array.isArray(value.validation.issues)
+  );
+}
+
+export function isFinancialReviewRecord(value: unknown): value is FinancialReviewRecord {
+  return (
+    isObject(value) &&
+    isString(value.id) &&
+    isString(value.document_id) &&
+    (value.decision === "approved" || value.decision === "rejected") &&
+    isString(value.reviewer_subject) &&
+    Array.isArray(value.corrections) &&
+    Array.isArray(value.structure_decisions) &&
+    isString(value.processing_version) &&
+    isString(value.result_schema_version) &&
+    isString(value.result_sha256) &&
+    isBoolean(value.active_result) &&
+    isString(value.created_at)
+  );
+}
+
+export function isFinancialReviewHistory(value: unknown): value is FinancialReviewHistory {
+  return (
+    isObject(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isFinancialReviewRecord)
+  );
+}
+
+export function isTranslationReviewRecord(value: unknown): value is TranslationReviewRecord {
+  return (
+    isObject(value) &&
+    isString(value.id) &&
+    isString(value.document_id) &&
+    (value.decision === "approved" || value.decision === "rejected") &&
+    isString(value.reviewer_subject) &&
+    Array.isArray(value.corrections) &&
+    isString(value.processing_version) &&
+    isString(value.result_schema_version) &&
+    isString(value.result_sha256) &&
+    isBoolean(value.active_result) &&
+    isString(value.created_at)
+  );
+}
+
+export function isTranslationReviewHistory(value: unknown): value is TranslationReviewHistory {
+  return (
+    isObject(value) &&
+    Array.isArray(value.items) &&
+    value.items.every(isTranslationReviewRecord)
+  );
+}
+
 export function isPageSummaryArray(value: unknown): value is PageSummary[] {
   return Array.isArray(value) && value.every(isPageSummary);
 }
@@ -240,6 +316,11 @@ export function isSessionStatus(value: unknown): value is SessionStatus {
     isBoolean(value.authenticated) &&
     isBoolean(value.auth_required) &&
     (value.subject === null || isString(value.subject)) &&
+    (value.organization_id === undefined ||
+      value.organization_id === null ||
+      isString(value.organization_id)) &&
+    (value.roles === undefined ||
+      (Array.isArray(value.roles) && value.roles.every(isString))) &&
     isString(value.security_label) &&
     isString(value.data_policy)
   );

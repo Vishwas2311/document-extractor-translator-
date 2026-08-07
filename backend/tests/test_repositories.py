@@ -6,15 +6,17 @@ on genuine transactional isolation, not on any particular Python-level mock.
 """
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from app.core.enums import DocumentStatus, JobStatus
+from app.core.enums import DocumentStatus, JobStatus, RetryMode
 from app.core.exceptions import ConflictError, JobNotFoundError
 from app.database.session import Database
 from app.models.document import Document
+from app.models.financial_review import FinancialReview
 from app.models.processing_job import ProcessingJob
 from app.repositories.documents import DocumentRepository
 
@@ -135,5 +137,94 @@ async def test_finish_processing_commits_document_and_job_together(tmp_path: Pat
 
         document = await repository.get(document_id)
         assert document.status == DocumentStatus.COMPLETED.value
+    finally:
+        await database.dispose()
+
+
+async def test_financial_review_is_append_only_and_updates_document_summary(
+    tmp_path: Path,
+) -> None:
+    repository, database = await _new_repository(tmp_path)
+    try:
+        document_id, _ = await _seed_document(
+            repository, status=DocumentStatus.NEEDS_REVIEW.value
+        )
+        await repository.update_document(
+            document_id,
+            financial_result_sha256="a" * 64,
+        )
+        reviewed_at = datetime.now(UTC)
+        persisted = await repository.create_financial_review(
+            FinancialReview(
+                document_id=document_id,
+                decision="approved",
+                reviewer_subject="reviewer:tok-safe-fingerprint",
+                note="Synthetic result checked.",
+                corrections=[
+                    {
+                        "cell_id": "cell-1",
+                        "normalized_value": "1234.56",
+                        "currency": "EUR",
+                        "reason": "Confirmed EU decimal format.",
+                    }
+                ],
+                processing_version="prd-local-4",
+                result_schema_version="financial-result-1.4",
+                result_sha256="a" * 64,
+                created_at=reviewed_at,
+            )
+        )
+
+        document = await repository.get(document_id)
+        history = await repository.financial_reviews(document_id)
+        assert persisted.id == history[0].id
+        assert history[0].corrections[0]["normalized_value"] == "1234.56"
+        assert document.financial_review_status == "approved"
+        assert document.financial_reviewed_by == "reviewer:tok-safe-fingerprint"
+        # Financial approval must not hide an independent OCR/translation
+        # review requirement on the document.
+        assert document.status == DocumentStatus.NEEDS_REVIEW.value
+    finally:
+        await database.dispose()
+
+
+async def test_reprocess_retry_resets_all_derived_document_counters(tmp_path: Path) -> None:
+    repository, database = await _new_repository(tmp_path)
+    try:
+        document_id, _ = await _seed_document(
+            repository, status=DocumentStatus.NEEDS_REVIEW.value
+        )
+        await repository.update_document(
+            document_id,
+            pages_ready=12,
+            translation_batches_done=3,
+            translation_batches_total=3,
+            financial_page_count=4,
+            uncertain_page_count=1,
+            financial_table_count=6,
+            financial_issue_count=2,
+            financial_result_sha256="b" * 64,
+            financial_review_status="rejected",
+            financial_reviewed_by="prior-reviewer",
+            financial_reviewed_at=datetime.now(UTC),
+            source_languages=["ar"],
+        )
+
+        await repository.create_retry_job(document_id, mode=RetryMode.REPROCESS)
+
+        document = await repository.get(document_id)
+        assert document.pages_ready == 0
+        assert document.translation_batches_done is None
+        assert document.translation_batches_total is None
+        assert document.financial_page_count is None
+        assert document.uncertain_page_count is None
+        assert document.financial_table_count is None
+        assert document.financial_issue_count is None
+        assert document.financial_result_sha256 is None
+        assert document.financial_review_status is None
+        assert document.financial_reviewed_by is None
+        assert document.financial_reviewed_at is None
+        assert document.source_languages == []
+        assert document.processing_version == "prd-local-4"
     finally:
         await database.dispose()

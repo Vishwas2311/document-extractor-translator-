@@ -31,7 +31,13 @@ class Database:
 
     async def create_schema(self) -> None:
         from app.database.base import Base
-        from app.models import document, processing_job  # noqa: F401
+        from app.models import (  # noqa: F401
+            audit_event,
+            document,
+            financial_review,
+            processing_job,
+            translation_review,
+        )
 
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
@@ -40,10 +46,30 @@ class Database:
         """Add PRD-readiness columns on existing SQLite databases (create_all won't alter)."""
         statements = [
             "ALTER TABLE documents ADD COLUMN data_class VARCHAR(32) DEFAULT 'synthetic'",
-            "ALTER TABLE documents ADD COLUMN processing_profile VARCHAR(64) DEFAULT 'GENAI_PSEUDONYMIZED'",
+            "ALTER TABLE documents ADD COLUMN processing_profile VARCHAR(64) "
+            "DEFAULT 'GENAI_PSEUDONYMIZED'",
             "ALTER TABLE documents ADD COLUMN pages_ready INTEGER",
             "ALTER TABLE documents ADD COLUMN translation_batches_done INTEGER",
             "ALTER TABLE documents ADD COLUMN translation_batches_total INTEGER",
+            "ALTER TABLE documents ADD COLUMN financial_extraction_mode VARCHAR(32) "
+            "DEFAULT 'post_extract'",
+            "ALTER TABLE documents ADD COLUMN financial_page_count INTEGER",
+            "ALTER TABLE documents ADD COLUMN uncertain_page_count INTEGER",
+            "ALTER TABLE documents ADD COLUMN financial_table_count INTEGER",
+            "ALTER TABLE documents ADD COLUMN financial_issue_count INTEGER",
+            "ALTER TABLE documents ADD COLUMN financial_result_sha256 VARCHAR(64)",
+            "ALTER TABLE documents ADD COLUMN financial_review_status VARCHAR(16)",
+            "ALTER TABLE documents ADD COLUMN financial_reviewed_by VARCHAR(255)",
+            "ALTER TABLE documents ADD COLUMN financial_reviewed_at DATETIME",
+            "ALTER TABLE documents ADD COLUMN organization_id VARCHAR(64) DEFAULT 'org-local'",
+            "ALTER TABLE documents ADD COLUMN owner_subject VARCHAR(255) DEFAULT 'local-api-token'",
+            "ALTER TABLE documents ADD COLUMN assigned_reviewer_subject VARCHAR(255)",
+            "ALTER TABLE documents ADD COLUMN assignment_status VARCHAR(32) DEFAULT 'unassigned'",
+            "ALTER TABLE documents ADD COLUMN document_review_status VARCHAR(32) DEFAULT 'draft'",
+            "ALTER TABLE documents ADD COLUMN translation_result_sha256 VARCHAR(64)",
+            "ALTER TABLE documents ADD COLUMN translation_review_status VARCHAR(16)",
+            "ALTER TABLE documents ADD COLUMN translation_reviewed_by VARCHAR(255)",
+            "ALTER TABLE documents ADD COLUMN translation_reviewed_at DATETIME",
         ]
         async with self.engine.begin() as connection:
 

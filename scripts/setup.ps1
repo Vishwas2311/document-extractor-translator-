@@ -35,4 +35,4 @@ finally {
 
 Write-Host "Setup complete." -ForegroundColor Green
 Write-Host "1. Add Azure values to backend/.env"
-Write-Host "2. Run scripts\run-poc.ps1, or start the backend and frontend scripts separately."
+Write-Host "2. Run scripts\run-local.ps1, or start the backend and frontend scripts separately."

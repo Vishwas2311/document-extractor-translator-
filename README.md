@@ -1,6 +1,6 @@
 # CareTranslate Studio
 
-A runnable proof of concept for youth-care teams to upload Arabic or Chinese PDFs/images, extract document structure with Azure Document Intelligence, translate non-English content with Azure OpenAI GPT-5-mini, and review page-wise English JSON in a studio-style interface.
+A production-oriented document-intelligence application under controlled local evaluation. It extracts multilingual document structure with Azure Document Intelligence, routes valid detected non-English languages through a backend-enforced Azure OpenAI translation boundary, and provides format-preserving financial review and export workflows.
 
 The app opens in a complete three-page demo, so the UI can be evaluated before Azure credentials are added.
 
@@ -11,6 +11,10 @@ The app opens in a complete three-page demo, so the UI can be evaluated before A
 - Azure OpenAI GPT-5-mini translation through the Azure v1 API and Structured Outputs
 - Deterministic block IDs, protected-token validation, retries, and review flags
 - One JSON artifact per page plus extracted and bilingual document exports
+- Immutable provider extraction plus versioned, evidence-backed reconstruction of aligned
+  table columns; reconstructed structure cannot be approved without a reviewer decision
+- Context-aware currency normalization, including explicit CNY/JPY handling for the shared
+  yen/yuan symbol without silently guessing when page evidence is absent
 - Next.js/TypeScript review studio with thumbnails, zoom, rotation, selectable overlays, and synchronized result cards
 - Extracted, Translated, and page-wise JSON tabs
 - PDF.js rendering for real documents and a no-credentials demo mode
@@ -18,7 +22,7 @@ The app opens in a complete three-page demo, so the UI can be evaluated before A
 
 ## Project documentation
 
-CareTranslate Studio is currently a functional proof of concept with an explicitly documented path to production. Use the status labels **Implemented**, **Partially implemented**, **Production target**, and **Open decision** to avoid confusing current behavior with planned capability.
+CareTranslate Studio currently provides an implemented local evaluation baseline plus an explicitly separated Azure production target. Use the status labels **Implemented**, **Partially implemented**, **Production target**, and **Open decision** to avoid confusing repository behavior with deployed platform controls.
 
 - **[Product requirements](docs/PRD.md):** Users, scope, functional and non-functional
   requirements, success measures, decisions, roadmap, and production release gates.
@@ -28,11 +32,14 @@ CareTranslate Studio is currently a functional proof of concept with an explicit
   and no-LLM routes, risks, approvals, and evidence gates.
 
 - **[Executive presentation](docs/presentations/CareTranslate-Studio-Executive-Overview.pptx):**
-  Seven-slide management overview of the product, current POC, secure Azure processing flow,
+  Seven-slide management overview of the product, local evaluation baseline, secure Azure processing flow,
   target architecture, processing profiles, production roadmap, and required decisions.
 
-- **[Architecture](docs/ARCHITECTURE.md):** Current POC design, processing flow, schemas, APIs,
+- **[Architecture](docs/ARCHITECTURE.md):** Current local design, processing flow, schemas, APIs,
   known gaps, and target Azure production architecture.
+
+- **[Financial extraction engine](docs/FINANCIAL-EXTRACTION.md):** Implemented page selection,
+  table integrity, normalization, review, reprocessing, experiment gates, and diagrams.
 
 - **[Engineering rules](docs/RULES.md):** Mandatory security, privacy, translation, versioning,
   testing, accessibility, and AI-assistant rules.
@@ -47,12 +54,17 @@ Start with `AGENTS.md` when contributing. Product and architecture decisions bel
 
 ## Architecture
 
+The implemented financial path preserves the original Document Intelligence result, creates a
+separate evidence-backed effective table only for complete row-aligned orphan columns, performs
+financial selection and translation on that effective structure, and requires human acceptance
+of every reconstructed table before approval.
+
 
 ```text
 Upload → Validate and store → Azure Document Intelligence → Normalize page/block geometry → Detect language → Batch non-English blocks → Azure OpenAI GPT-5-mini → Validate IDs and protected tokens → Write page JSON/exports → Review in Studio
 ```
 
-1. **Architecture view:** Current POC
+1. **Architecture view:** Implemented local evaluation baseline
    - **Data route:** Browser → Python API → Azure Document Intelligence → raw extracted
      non-English blocks → Azure OpenAI
    - **Exposed to generative LLM?:** **Yes; raw extracted blocks may be processed by the LLM**
@@ -77,7 +89,7 @@ Upload → Validate and store → Azure Document Intelligence → Normalize page
 1. **Diagram status:** Proposed secure production path
    - **Azure OpenAI position:** Retained for approved translation/future features; normally
      receives approved minimized/pseudonymized blocks only
-   - **Implementation status:** Planned; not implemented in the current POC
+   - **Implementation status:** Production target; not implemented in the local baseline
 
 ```mermaid
 flowchart TB
@@ -174,7 +186,7 @@ Edit backend/.env and enter the Azure values described below. Then start both se
 
 
 ```text
-PowerShell -ExecutionPolicy Bypass -File .\scripts\run-poc.ps1
+PowerShell -ExecutionPolicy Bypass -File .\scripts\run-local.ps1
 ```
 
 Open:
@@ -210,15 +222,17 @@ AZURE_OPENAI_REASONING_EFFORT=minimal
 
 Important: AZURE_OPENAI_DEPLOYMENT is the deployment name created in Azure, not necessarily the catalog model name.
 
-The frontend needs these browser-safe values in frontend/.env.local:
+The frontend uses a same-origin server proxy. Browser configuration contains only the proxy URL;
+the shared local backend token remains server-side in `frontend/.env.local`:
 
 
 ```text
-NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
-NEXT_PUBLIC_API_AUTH_TOKEN=local-dev-token-change-me
+NEXT_PUBLIC_API_BASE_URL=/api/backend
+BACKEND_API_BASE_URL=http://127.0.0.1:8000/api/v1
+API_AUTH_TOKEN=replace-with-a-token-listed-in-backend-API_AUTH_TOKENS
 ```
 
-Match `NEXT_PUBLIC_API_AUTH_TOKEN` to a token listed in backend `API_AUTH_TOKENS`.
+Match server-only `API_AUTH_TOKEN` to a token listed in backend `API_AUTH_TOKENS`.
 This local bearer token is for localhost PRD-ready auth only — never put Azure
 keys in any `NEXT_PUBLIC_*` variable. Production replaces this with Entra/JWT.
 
@@ -255,7 +269,7 @@ The frontend is still started with scripts/start-frontend.ps1. Runtime database 
 2. The original file is stored under storage/documents/<document-id>/source.
 3. Azure Document Intelligence prebuilt-layout returns pages, paragraphs, words, tables, languages, spans, and polygons.
 4. The mapper creates deterministic block IDs and page-aware geometry.
-5. English blocks are retained; Arabic, Simplified/Traditional Chinese, and mixed blocks are batched for translation.
+5. English blocks are retained; blocks with any valid detected non-English BCP 47 language tag are batched for translation. Unknown or unconfident language results fail to review rather than being guessed.
 6. GPT-5-mini returns a strict structured response keyed by the original block IDs.
 7. Validation checks exact IDs/order, empty translations, and protected values such as dates, case codes, URLs, email addresses, and numbers.
 8. The backend writes one canonical JSON file per page plus extracted and bilingual exports.
@@ -332,6 +346,7 @@ Backend:
 ```text
 cd backend
 .\.venv\Scripts\python.exe -m ruff check app tests
+.\.venv\Scripts\python.exe -m mypy app tests
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 ```
 
@@ -342,10 +357,34 @@ Frontend:
 cd frontend
 npm run lint
 npm run build
+npm test
 ```
 
-## POC boundaries
+## Local evaluation boundaries
 
-This POC deliberately uses SQLite, local artifact storage, an in-process worker, Azure Document Intelligence, and an Azure OpenAI translation path that receives extracted source text. It has no production data-classification or policy gateway. **Do not use real personal, youth-care, clinical, legal, education, justice, or other sensitive records.**
+The local evaluation baseline uses SQLite, local artifact storage, and an in-process worker. It includes backend authentication tokens and processing-profile enforcement, but not Entra tenant authorization, managed persistence, malware quarantine, private networking, or durable provider-deletion evidence. **Do not use real personal, youth-care, clinical, legal, education, justice, or other sensitive records.**
+
+## Financial-only extraction
+
+**Implemented in the local evaluation baseline:** the processing pipeline creates versioned financial page classifications, an ordered financial-content stream, normalized financial tables, validation findings, JSON/CSV/XLSX exports, and result-hash-bound append-only reviewer decisions. The financial-content stream preserves tables as grids, headings as headings, key-values as pairs, lists as lists, and narrative financial text as paragraphs. The UI provides source/English financial document views plus Financial, Review, and All server-filtered page modes while preserving original PDF page numbers and source geometry.
+
+The local default is `FINANCIAL_EXTRACTION_MODE=post_extract`. It runs the existing layout extraction first and then applies deterministic financial table/page rules. This mode supports local evaluation but does not reduce Document Intelligence page-analysis cost.
+
+**Partially implemented:** `FINANCIAL_EXTRACTION_MODE=selective` calls an Azure Document Intelligence custom classifier, conservatively selects financial and uncertain pages, includes configured adjacent pages, and sends only the resulting contiguous ranges to detailed layout extraction. It requires `FINANCIAL_CLASSIFIER_MODEL_ID`; startup fails closed when the ID is missing. Production enablement also requires an approved classifier, labeled validation corpus, provider/data-class approval, and the infrastructure/security gates in `docs/DATA-SECURITY.md`.
+
+New result endpoints are:
+
+- `GET /api/v1/documents/{id}/classification`
+- `GET /api/v1/documents/{id}/financial-result`
+- `GET /api/v1/documents/{id}/financial-validation`
+- `GET|POST /api/v1/documents/{id}/financial-reviews`
+- `GET /api/v1/documents/{id}/pages?view=financial|review|all`
+- `GET /api/v1/documents/{id}/downloads/financial`
+- `GET /api/v1/documents/{id}/downloads/financial-csv`
+- `GET /api/v1/documents/{id}/downloads/financial-xlsx`
+
+The original source and canonical extraction remain immutable. Normalized values and validation findings are separate versioned artifacts.
+
+The complete implemented contract, Mermaid flows, review gates, and pre-P2 experiment plan are in [docs/FINANCIAL-EXTRACTION.md](docs/FINANCIAL-EXTRACTION.md).
 
 Before a real-data pilot, implement and verify organization authentication, backend authorization, tenant isolation, quarantine/malware scanning, private managed storage and queues, managed identity, private endpoints, outbound egress controls, server-side processing profiles, immediate provider-result deletion, content-free telemetry, retention/deletion evidence, audit, incident response, and human review. The full management decision and evidence plan is in [docs/DATA-SECURITY.md](docs/DATA-SECURITY.md).

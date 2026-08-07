@@ -1,6 +1,9 @@
 # CareTranslate Studio frontend
 
-The browser review workspace for the CareTranslate Studio POC. It runs in a complete demo mode without credentials and connects to the Python API when NEXT_PUBLIC_API_BASE_URL is configured.
+The browser review workspace for the CareTranslate Studio production-oriented local evaluation
+baseline. It runs in a complete synthetic demo mode without credentials and connects to the
+Python API through a same-origin server proxy. `NEXT_PUBLIC_API_BASE_URL` contains only the
+browser-safe proxy path; `BACKEND_API_BASE_URL` and `API_AUTH_TOKEN` remain server-only.
 
 From this directory:
 
@@ -18,7 +21,7 @@ Security boundary:
    - **Status:** Production target
 
 2. **Browser security rule:** Use only synthetic or explicitly approved de-identified data in
-   the current POC
+   the current local evaluation baseline
    - **Data/LLM effect:** Current raw extracted text may reach Azure OpenAI
    - **Status:** Current mandatory constraint
 

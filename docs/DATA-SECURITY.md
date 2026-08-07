@@ -4,14 +4,14 @@
 
 - **Status:** Proposed for management, security, privacy, legal, and architecture review
 
-- **Applies to:** Current POC and production roadmap
+- **Applies to:** Implemented local evaluation baseline and production roadmap
 
 - **Information in scope:** Uploaded documents, page images, extracted text, translations,
   review data, exports, and operational metadata
 
-- **Last reviewed:** 2026-08-02
+- **Last reviewed:** 2026-08-06
 
-> **Important:** This document describes proposed production controls. It is not evidence that those controls are already implemented. The current POC is unauthenticated and may use Azure Document Intelligence and Azure OpenAI; it is approved only for synthetic or explicitly approved de-identified test data.
+> **Important:** This document describes proposed production controls. It is not evidence that those controls are deployed. The local baseline has a development bearer-token gate but lacks Entra tenant/object authorization and the P2 platform controls. It may use Azure Document Intelligence and Azure OpenAI and is approved only for synthetic or explicitly approved de-identified test data.
 
 ## 1. Executive recommendation
 
@@ -76,7 +76,7 @@
 
 ### 1.1 Secure Azure OpenAI-enabled production flow
 
-> **Proposed production target — not implemented in the current POC.** The diagram is intentionally compact so that it remains readable in GitHub and document previews.
+> **Proposed production target — not implemented in the current local baseline.** The diagram is intentionally compact so that it remains readable in GitHub and document previews.
 
 ```mermaid
 flowchart TB
@@ -102,7 +102,7 @@ flowchart TB
    - **Required functions:** Server-side policy evaluation, data minimization, multilingual PII
      detection, deterministic tokenization, separately encrypted re-identification map and
      fail-closed routing
-   - **Implementation status:** Production target; not implemented in the POC
+   - **Implementation status:** Production target; not implemented in the local baseline
 
 ### 1.2 Which service protects which part
 
@@ -291,21 +291,21 @@ flowchart TB
 1. **Service or stage:** Browser and upload path
    - **Exposed to a generative LLM?:** No, not by itself
    - **What could reach the LLM?:** Nothing until the backend creates a model request
-   - **Current POC:** The browser uploads the full document to the API
+   - **Current local baseline:** The browser uploads the full document to the API
    - **Required production rule:** Browser code must never call Azure OpenAI or select the
      processing profile
 
 2. **Service or stage:** Front Door, API Management and Container Apps API
    - **Exposed to a generative LLM?:** No, not by themselves
    - **What could reach the LLM?:** Nothing unless backend application logic forwards content
-   - **Current POC:** The API accepts the complete document
+   - **Current local baseline:** The API accepts the complete document
    - **Required production rule:** Authenticate and authorize; disable document-body logging;
      only the policy-controlled worker may call an AI provider
 
 3. **Service or stage:** Blob quarantine and Defender for Storage
    - **Exposed to a generative LLM?:** No
    - **What could reach the LLM?:** Nothing
-   - **Current POC:** The source is stored locally in the POC; production scanning is not
+   - **Current local baseline:** The source is stored locally; production scanning is not
      implemented
    - **Required production rule:** Scan and quarantine the full file, but never forward it to
      Azure OpenAI from storage or malware events
@@ -315,14 +315,14 @@ flowchart TB
      LLM**
    - **What could reach the LLM?:** Nothing automatically; DI does not send its result to Azure
      OpenAI
-   - **Current POC:** DI receives the complete document and returns extracted content
+   - **Current local baseline:** DI receives the complete document and returns extracted content
    - **Required production rule:** Use the approved regional/private DI route and immediately
      request result deletion; the backend controls the next step
 
 5. **Service or stage:** Event Grid and Service Bus
    - **Exposed to a generative LLM?:** No
    - **What could reach the LLM?:** Nothing if messages remain content-free
-   - **Current POC:** Not the current POC execution model
+   - **Current local baseline:** Not the current execution model
    - **Required production rule:** Carry identifiers and immutable policy metadata only; never
      carry document bodies, extracted text or prompts
 
@@ -330,14 +330,14 @@ flowchart TB
    - **Exposed to a generative LLM?:** No; it is the control before the LLM
    - **What could reach the LLM?:** Only blocks that pass classification, minimization, PII
      detection and tokenization
-   - **Current POC:** Not implemented
+   - **Current local baseline:** Not implemented
    - **Required production rule:** Fail closed; raw extracted text stays inside the controlled
      boundary under the normal profile
 
 7. **Service or stage:** Azure OpenAI
    - **Exposed to a generative LLM?:** **Yes**
    - **What could reach the LLM?:** Exactly the prompt blocks submitted by the backend
-   - **Current POC:** Raw extracted non-English blocks and table-cell text can be sent for
+   - **Current local baseline:** Raw extracted non-English blocks and table-cell text can be sent for
      translation; therefore real sensitive data is prohibited
    - **Required production rule:** `GENAI_PSEUDONYMIZED` sends only minimum approved
      pseudonymized blocks; raw content requires `GENAI_RAW_EXCEPTION`
@@ -345,7 +345,7 @@ flowchart TB
 8. **Service or stage:** Output validation and human review
    - **Exposed to a generative LLM?:** No additional LLM exposure
    - **What could reach the LLM?:** Azure OpenAI output is checked and tokens are restored
-   - **Current POC:** The POC validates translation structure and protected tokens
+   - **Current local baseline:** The application validates translation structure and protected tokens
    - **Required production rule:** PII leakage, schema, ID, coverage and human-review checks
      must pass before approval
 
@@ -353,7 +353,7 @@ flowchart TB
    - **Exposed to a generative LLM?:** No, unless a future feature explicitly creates another
      governed model request
    - **What could reach the LLM?:** Nothing under the normal storage/telemetry path
-   - **Current POC:** Local artifacts and metadata are retained by the POC
+   - **Current local baseline:** Local artifacts and metadata are retained locally
    - **Required production rule:** Content-free telemetry; future AI features must return
      through the same policy gateway and approved profile
 
@@ -364,15 +364,15 @@ flowchart TB
 - **What service is the generative LLM boundary?:** **Azure OpenAI.** It processes exactly the
   prompt blocks explicitly submitted by the CareTranslate backend.
 
-- **What does the current POC submit?:** Raw extracted non-English text and table-cell content
-  can be submitted; therefore the POC is restricted to synthetic or approved de-identified data.
+- **What does the current local baseline submit?:** Raw extracted non-English text and table-cell content
+  can be submitted; therefore the baseline is restricted to synthetic or approved de-identified data.
 
 - **What should production normally submit?:** Only the minimum approved, pseudonymized blocks
   through `GENAI_PSEUDONYMIZED`.
 
 ## 2. Decisions requested from management
 
-1. **Decision:** May the POC process real records?
+1. **Decision:** May the local evaluation baseline process real records?
    - **Recommended answer:** No; synthetic or explicitly approved de-identified data only
    - **Required approvers:** Product, Security, Privacy
    - **Status:** Proposed
@@ -438,9 +438,9 @@ flowchart TB
 
 No production pilot with real records should start until the open items are approved and recorded in an Architecture Decision Record (ADR) and deployment-specific data-protection assessment.
 
-## 3. Current POC finding
+## 3. Current local evaluation finding
 
-The implemented POC follows this content path:
+The implemented local baseline follows this content path:
 
 ```mermaid
 flowchart LR
@@ -454,7 +454,7 @@ flowchart LR
     Disk --> Browser
 ```
 
-Sensitive content can exist in all of the following POC artifacts:
+Sensitive content can exist in all of the following local artifacts:
 
 - The original upload.
 - The provider's Document Intelligence input and analysis result.
@@ -466,7 +466,10 @@ Sensitive content can exist in all of the following POC artifacts:
 
 Existing helpful controls include file-signature and size validation, path confinement, backend-only Azure configuration, structured translation output, prompt-injection instructions, protected-token validation, safe public errors, and normal-path content-free logging.
 
-The POC is **not approved for real sensitive data** because it lacks production authentication, object authorization, tenant isolation, malware scanning, durable audit trails, retention automation, immediate provider-result deletion, private networking, managed identity, policy-based routing, and formal security evidence.
+The local baseline is **not approved for real sensitive data** because it lacks Entra authentication,
+object authorization, tenant isolation, malware scanning, production audit evidence, retention
+automation, durable provider-deletion receipts/retry/alerting, classifier-result deletion support,
+private networking, managed-identity deployment evidence, and formal security evidence.
 
 ## 4. Security meanings that must not be confused
 
@@ -589,12 +592,12 @@ Option D is the proposed normal Azure OpenAI-enabled production route because th
 
 The backend policy engine must choose one of these profiles. A browser request, user role, retry, or provider outage must never downgrade the policy.
 
-1. **Profile:** `POC_SYNTHETIC`
+1. **Profile:** `GENAI_SYNTHETIC_POC` (persisted compatibility identifier)
    - **Permitted data:** Synthetic or explicitly approved de-identified test data
    - **OCR/extraction:** Current Azure Document Intelligence path
    - **Translation:** Current Azure OpenAI path permitted for testing
    - **Generative AI:** Permitted for approved test data
-   - **Current status:** Current POC constraint
+   - **Current status:** Current local-evaluation constraint
 
 2. **Profile:** `GENAI_PSEUDONYMIZED`
    - **Permitted data:** Approved confidential or lower-classification data after policy
@@ -707,7 +710,7 @@ Each processing attempt must persist a content-free decision record containing:
 - For `GENAI_PSEUDONYMIZED`, identify and replace direct and quasi-identifiers locally with deterministic format-preserving tokens before the external call.
 - A `GENAI_RAW_EXCEPTION` may bypass selected transformations only when the signed exception explicitly and lawfully authorizes that exact content and purpose; all other controls still apply.
 - Encrypt the token mapping with a separate key, store it separately, authorize it independently, and delete it before or with the document.
-- Test Arabic, Simplified Chinese, Traditional Chinese, mixed scripts, OCR errors, names, addresses, dates, IDs, free text, and tables for missed identifiers.
+- Test every production-enabled source language and script, mixed-language content, OCR errors, names, addresses, dates, IDs, free text, and tables for missed identifiers. Generic translation routing MUST NOT expand the production language allowlist beyond the languages proved by the approved PII and leakage benchmark.
 - Use layered detection: exact-format rules and approved dictionaries plus a self-hosted multilingual detector. Azure AI Language documents text-PII support for Arabic and both Chinese variants, but the exact container tags, accuracy and licensing must be proved before selection. Its managed API is another external processor and must not be introduced implicitly.
 - Treat pseudonymized content as confidential. If detection confidence is below policy, block the LLM route.
 
@@ -771,14 +774,14 @@ For `GENAI_PSEUDONYMIZED` and `GENAI_RAW_EXCEPTION`, all of the following are ma
 
 ## 9. Delivery roadmap and evidence gates
 
-### Gate 0 — POC containment
+### Gate 0 — Local evaluation containment
 
 - Keep synthetic/de-identified-only banners and operating instructions.
 - Prevent public exposure of the backend and remove unsupported security claims from the UI.
 - Inventory every content copy and external call.
 - Obtain the management decisions in Section 2.
 
-**Exit evidence:** signed data-use restriction, current data-flow diagram, service inventory, threat-model owner, and no real records in POC storage.
+**Exit evidence:** signed data-use restriction, current data-flow diagram, service inventory, threat-model owner, and no real records in local evaluation storage.
 
 ### Gate 1 — Security foundation
 
@@ -793,7 +796,7 @@ For `GENAI_PSEUDONYMIZED` and `GENAI_RAW_EXCEPTION`, all of the following are ma
 - Use regional/private Document Intelligence, call immediate result deletion, and pass only approved blocks through the Data Security Gateway.
 - Implement multilingual PII detection, deterministic tokenization, separately encrypted mappings, output leakage checks, token restoration, and fail-closed thresholds.
 - Harden Azure OpenAI with a private endpoint, managed identity, one approved region, verified modified abuse-monitoring status, stateless request/response APIs, content-free telemetry, and a kill switch.
-- Validate Arabic and both Chinese variants using approved synthetic and de-identified benchmark data.
+- Validate every proposed production source language and document family using approved synthetic and de-identified benchmark data. Arabic and both Chinese variants remain mandatory regression fixtures, not the full language boundary.
 
 **Exit evidence:** approved contract/region, provider configuration capture, deletion receipts, gateway and leakage benchmark, content-free telemetry tests, Azure OpenAI configuration evidence, translation-quality report, and human-review workflow acceptance.
 
@@ -842,7 +845,7 @@ For `GENAI_PSEUDONYMIZED` and `GENAI_RAW_EXCEPTION`, all of the following are ma
 
 ## 11. Priority risk register
 
-1. **Risk:** Real records enter the POC
+1. **Risk:** Real records enter the local evaluation environment
    - **Consequence:** Uncontrolled disclosure and non-compliance
    - **Required treatment:** Technical/environment separation, visible restriction, operator
      training, periodic storage check
@@ -919,9 +922,19 @@ For `GENAI_PSEUDONYMIZED` and `GENAI_RAW_EXCEPTION`, all of the following are ma
 - [ ] Approve human-review responsibilities and prohibited automated decisions.
 - [ ] Accept the evidence gates before a real-data pilot and production launch.
 
-After approval, create an ADR for the selected profiles/providers and a deployment-specific security plan. Until then, this document remains a proposal and the synthetic-only POC restriction remains in force.
+After approval, create an ADR for the selected profiles/providers and a deployment-specific security plan. Until then, this document remains a proposal and the synthetic-only local-evaluation restriction remains in force.
 
-## 13. Official references
+## 13. Financial extraction data boundary
+
+**Implemented local evaluation behavior:** `post_extract` sends the approved source through the existing Document Intelligence layout route, persists the immutable provider extraction locally, and derives financial-only artifacts without using a generative model for classification, table reconciliation, or numeric normalization. A separate content-bearing `table-reconciliation-1.0` artifact records deterministic candidate evidence and source-block IDs; it stays inside the same protected local artifact boundary and is deleted with other derived artifacts on reprocess. CSV/XLSX formula neutralization covers raw text, normalized values including negatives, identifiers, currencies, validation messages, and reconstruction provenance. Classification persistence is minimized to approved evidence and decisions rather than the full provider payload.
+
+**Partially implemented selective behavior:** the custom classifier receives the approved source document because it must classify its pages. Its response is reduced to labels, confidences, page decisions, reasons, model/version metadata, and selected page ranges. Detailed layout analysis then receives selected financial, uncertain, and configured adjacent pages only.
+
+Selective extraction is not a privacy bypass: the classifier call is still an external content transmission and requires the same backend policy, region, network, retention, and provider approval checks as Document Intelligence extraction. Unknown policy, missing classifier configuration, invalid cached classification, or classifier/policy fingerprint mismatch fails closed. Financial reviewer corrections and table-structure decisions are append-only and result-hash-bound locally, but Entra identity, object authorization, reviewed-export materialization, and production audit evidence are not implemented. The baseline still lacks malware quarantine, tenant isolation, private endpoints, managed Blob/PostgreSQL/Service Bus, and durable provider-deletion evidence; therefore real sensitive records remain prohibited.
+
+The complete financial flow, review boundary, reprocessing invalidation sequence, and experiment gate are specified in [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md).
+
+## 14. Official references
 
 Service behavior and terms can change. Re-verify these sources for the selected subscription, region, SKU, feature, and contract before each security approval.
 
@@ -943,6 +956,7 @@ Service behavior and terms can change. Re-verify these sources for the selected 
 - [Azure Front Door Web Application Firewall](https://learn.microsoft.com/en-us/azure/web-application-firewall/afds/afds-overview)
 - [API Management validate-jwt policy](https://learn.microsoft.com/en-us/azure/api-management/validate-jwt-policy)
 - [Microsoft Entra Conditional Access overview](https://learn.microsoft.com/en-us/entra/identity/conditional-access/overview)
+
 - [Azure Key Vault Managed HSM overview](https://learn.microsoft.com/en-us/azure/key-vault/managed-hsm/overview)
 - [Azure Well-Architected security checklist](https://learn.microsoft.com/en-us/azure/well-architected/security/checklist)
 - [Microsoft Products and Services Data Protection Addendum](https://www.microsoft.com/licensing/docs/view/Microsoft-Products-and-Services-Data-Protection-Addendum-DPA?lang=1)

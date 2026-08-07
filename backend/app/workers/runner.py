@@ -1,20 +1,36 @@
 import asyncio
+from collections.abc import Sequence
+from typing import Protocol
 
 import structlog
 
 from app.core.enums import TERMINAL_DOCUMENT_STATUSES, DocumentStatus
 from app.core.exceptions import DocumentNotFoundError
-from app.repositories.documents import DocumentRepository
-from app.services.processing import ProcessingService
 
 logger = structlog.get_logger(__name__)
+
+
+class ProcessingWorker(Protocol):
+    async def process(self, document_id: str) -> None: ...
+
+
+class DocumentState(Protocol):
+    status: str
+
+
+class RunnerRepository(Protocol):
+    async def clear_stale_leases(self) -> int: ...
+
+    async def recoverable_document_ids(self) -> Sequence[str]: ...
+
+    async def get(self, document_id: str) -> DocumentState: ...
 
 
 class InProcessJobRunner:
     def __init__(
         self,
-        processing_service: ProcessingService,
-        repository: DocumentRepository,
+        processing_service: ProcessingWorker,
+        repository: RunnerRepository,
         concurrency: int = 1,
         recovery_sweep_seconds: int = 60,
     ) -> None:

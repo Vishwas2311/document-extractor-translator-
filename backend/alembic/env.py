@@ -7,7 +7,10 @@ from alembic import context
 from app.core.config import get_settings
 from app.database.base import Base
 from app.models.document import Document  # noqa: F401
+from app.models.financial_review import FinancialReview  # noqa: F401
 from app.models.processing_job import ProcessingJob  # noqa: F401
+from app.models.translation_review import TranslationReview  # noqa: F401
+from app.models.audit_event import AuditEvent  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

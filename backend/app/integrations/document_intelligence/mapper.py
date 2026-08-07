@@ -207,6 +207,7 @@ class DocumentIntelligenceMapper:
                     column_index=int(value(cell, "column_index", "columnIndex", 0)),
                     row_span=int(value(cell, "row_span", "rowSpan", 1)),
                     column_span=int(value(cell, "column_span", "columnSpan", 1)),
+                    source_language=language_for(spans(cell), raw_languages),
                     content=str(value(cell, "content", default="")),
                     kind=value(cell, "kind"),
                     spans=spans(cell),

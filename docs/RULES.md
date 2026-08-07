@@ -1,9 +1,9 @@
 # CareTranslate Studio Engineering Rules
 
 **Document type:** Normative engineering and operating rules
-**Applies to:** POC maintenance and production evolution
-**Last reviewed:** 2026-08-02
-**Baseline:** repository commit `14518cc`
+**Applies to:** Local evaluation maintenance and production evolution
+**Last reviewed:** 2026-08-06
+**Baseline:** current uncommitted evaluation tree; verify revision before release
 
 ## 1. Purpose and authority
 
@@ -28,8 +28,8 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
 
 ## 2. Data classification and permitted use
 
-1. The current POC MUST use synthetic, de-identified, or explicitly approved test documents only.
-2. Real youth, child-welfare, education, health, justice, case-management, or other sensitive personal records MUST NOT be uploaded to the POC.
+1. The local evaluation baseline MUST use synthetic, de-identified, or explicitly approved test documents only.
+2. Real youth, child-welfare, education, health, justice, case-management, or other sensitive personal records MUST NOT be uploaded to the local baseline.
 3. Sample documents committed to source control MUST be synthetic and MUST contain no secrets, personal data, or recoverable identifiers.
 4. Production processing of real records is prohibited until every production release gate in `docs/PRD.md` has an accountable owner and evidence of approval.
 5. Document text, page images, translations, comments, and extracted values MUST be treated as confidential content.
@@ -39,7 +39,7 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
 ### 2.1 Processing profiles and external AI services
 
 1. The backend MUST assign an approved processing profile before any document content crosses an external service boundary. The frontend MUST NOT select, override, or downgrade that profile.
-2. The permitted profiles are defined in `docs/DATA-SECURITY.md`: `POC_SYNTHETIC`, `GENAI_PSEUDONYMIZED`, `MANAGED_NO_LLM`, `RESTRICTED_LOCAL`, `GENAI_RAW_EXCEPTION`, and `HUMAN_ONLY`.
+2. The implemented compatibility profile is `GENAI_SYNTHETIC_POC`; production profiles are defined in `docs/DATA-SECURITY.md`. The compatibility identifier MUST NOT be renamed without a persisted-data and API migration.
 3. Missing classification, jurisdiction, policy, provider approval, exception, or required control evidence MUST fail closed into quarantine or authorized human review.
 4. `GENAI_PSEUDONYMIZED` MUST send only the minimum required blocks after server-side policy approval, multilingual PII detection, deterministic pseudonymization, and confidence checks inside the controlled boundary.
 5. Raw confidential or restricted content MUST NOT be sent to Azure OpenAI or another generative LLM unless a written, time-bounded `GENAI_RAW_EXCEPTION` explicitly permits the exact data class, purpose and period.
@@ -54,12 +54,12 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
 14. A provider/profile kill switch MUST be available before real-data production use.
 15. Service-specific behavior, licensing, language support, contract, region, and control status MUST be re-verified for the deployed resource. Documentation alone is not deployment evidence.
 
-1. **Processing profile:** `POC_SYNTHETIC`
+1. **Processing profile:** `GENAI_SYNTHETIC_POC` (persisted compatibility identifier)
    - **Data allowed:** Synthetic or explicitly approved de-identified test data
    - **Exposed to generative LLM?:** Yes; current raw extracted non-English blocks may be
      submitted
    - **Mandatory routing rule:** MUST NOT process real sensitive records
-   - **Status:** Current POC constraint
+   - **Status:** Current local-evaluation constraint
 
 2. **Processing profile:** `GENAI_PSEUDONYMIZED`
    - **Data allowed:** Approved classifications after minimization/tokenization
@@ -96,7 +96,7 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
    - **Mandatory routing rule:** MUST remain quarantined or enter an authorized human workflow
    - **Status:** Required fallback
 
-The proposed components below are production requirements, not claims about the current POC:
+The proposed components below are production requirements, not claims about the current local baseline:
 
 1. **Service boundary:** Entra ID + Front Door Premium WAF + API Management
    - **Data handled:** Identity/request metadata; upload traffic on approved route
@@ -173,7 +173,7 @@ The proposed components below are production requirements, not claims about the 
 
 ## 4. Authentication and authorization
 
-1. The POC MUST be labeled as unauthenticated wherever that limitation affects use.
+1. The local baseline MUST be labeled as development-token protected and not production-authorized wherever that limitation affects use.
 2. Production MUST authenticate every interactive user and service identity.
 3. Production authorization MUST be enforced by the backend; hiding frontend controls is not authorization.
 4. Access MUST follow least privilege and the approved roles: Caseworker, Reviewer, Administrator, Auditor, and System Operator.
@@ -232,6 +232,8 @@ The following invariants are mandatory:
 12. Missing source coverage, extra output blocks, changed identifiers, invalid JSON, or token mismatches MUST fail validation.
 13. Review corrections and approvals MUST record actor, timestamp, prior value, new value, reason when required, and translation/processing version.
 14. Approved translations MUST NOT be overwritten by an automated retry. A new version must be created.
+15. A financial projection MUST preserve the source semantic type and reading order: tables remain grids, headings remain headings, key-values remain pairs, and list/paragraph content remains distinguishable.
+16. Financial-only text selection MUST use versioned deterministic evidence. Unrelated narrative MUST NOT be included merely because it shares a selected page; uncertain evidence MUST remain reviewable rather than being silently discarded.
 
 ## 9. Prompt and model changes
 
@@ -239,7 +241,7 @@ The following invariants are mandatory:
 2. Any change that can affect translation output MUST increment the prompt or processing version.
 3. Model deployment, model parameters, batching policy, and validation policy MUST be captured with each translation job.
 4. Prompt changes MUST be tested against the approved synthetic regression corpus before release.
-5. Tests MUST cover Arabic, Simplified Chinese, Traditional Chinese, mixed-language content, right-to-left text, tables, protected tokens, empty pages, and low-confidence OCR.
+5. Tests MUST cover Arabic, Simplified Chinese, Traditional Chinese, at least one Latin-script non-English language, Cyrillic, Indic script, mixed-language content, right-to-left text, English pass-through, invalid/unknown language, tables, protected tokens, empty pages, and low-confidence OCR.
 6. A model upgrade MUST be evaluated for fidelity, coverage, token preservation, latency, cost, and safety behavior.
 7. Provider-specific prompt behavior MUST remain behind a service boundary so the core document schema is provider-independent.
 
@@ -310,7 +312,7 @@ Changes MUST include tests proportional to their risk. At minimum:
 - Extraction mapping tests for order, geometry, paragraphs, key-value pairs, selections, and table spans.
 - Translation validation tests for missing, duplicate, reordered, altered, and extra identifiers.
 - Protected-token and English-pass-through tests.
-- Arabic and both Chinese variant fixtures.
+- Multilingual routing fixtures covering Arabic, both Chinese variants, Latin-script non-English, Cyrillic, Indic script, mixed text, English pass-through, and unknown-language review.
 - Retry and idempotency tests for each supported mode.
 - Authorization tests for every role and object boundary before production.
 - Upload tests for spoofed content types, invalid signatures, oversized documents, malware quarantine, and path traversal.
@@ -355,12 +357,33 @@ Repository-level checks SHOULD also include secret scanning, dependency scanning
 1. Product behavior or scope changes MUST update `docs/PRD.md`.
 2. Component boundaries, data flow, deployment, storage, or trust-boundary changes MUST update `docs/ARCHITECTURE.md` or add an ADR.
 3. Data classification, external processing, privacy control, retention, or security-approval changes MUST update `docs/DATA-SECURITY.md` and the relevant PRD/architecture requirements.
+
+## Financial extraction rules
+
+1. Financial page selection MUST be server-controlled, versioned, and persisted with label, confidence, decision reason, model ID, model version, and original source page number.
+2. Unknown and low-confidence pages MUST fail toward inclusion/review, not silent exclusion.
+3. Selective extraction MUST preserve the source document page count even when only a subset of page artifacts exists.
+4. Raw OCR values, normalized decimal values, translations, validation findings, and reviewer corrections MUST remain separate fields; corrections MUST NOT overwrite source extraction.
+5. Numeric values, currencies, identifiers, and protected tokens MUST NOT be generatively translated.
+6. Spreadsheet exports MUST neutralize untrusted formula prefixes and preserve numeric precision.
+7. Cached classification results MUST match the configured classifier ID and version; mismatches MUST require a controlled reprocess.
+8. `post_extract` MUST be labeled as a full-layout evaluation fallback because it analyzes the complete document layout.
+9. Financial approval MUST NOT clear an independent OCR or translation review requirement.
+10. Derived artifacts MUST require a current manifest and MUST NOT be served for failed or cancelled attempts.
+11. Provider table extraction MUST remain immutable. Any effective-table reconstruction MUST
+    be deterministic, versioned, provenance-linked to source blocks, independently persisted,
+    review-required, and explicitly accepted before financial approval.
+12. A currency symbol shared by multiple currencies MUST remain ambiguous unless explicit
+    source or page-context evidence resolves it; the application MUST NOT choose a default
+    currency from the glyph alone.
+
 4. Engineering-policy changes MUST update this file.
 5. Stable commands, versions, limitations, and current-state facts MUST update `docs/MEMORY.md`.
 6. Contributor workflow changes MUST update `AGENTS.md`.
 7. Documentation MUST distinguish current implementation from production targets.
 8. Links and commands MUST be verified before merge.
 9. Dates and baseline revisions SHOULD be updated when a document is materially reviewed.
+10. Financial extraction behavior and diagrams MUST remain synchronized with [FINANCIAL-EXTRACTION.md](./FINANCIAL-EXTRACTION.md).
 
 ## 18. Rules for AI-assisted changes
 
@@ -387,7 +410,7 @@ An exception to a **MUST** rule requires:
 4. A tracking item for permanent resolution.
 5. Security, privacy, legal, or product approval when those areas are affected.
 
-Expired exceptions are invalid. Exceptions MUST NOT be used to bypass the POC prohibition on real sensitive records.
+Expired exceptions are invalid. Exceptions MUST NOT be used to bypass the local-baseline prohibition on real sensitive records.
 
 ## 20. Pull-request completion checklist
 

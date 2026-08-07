@@ -59,11 +59,11 @@ def assign_stable_ids(document: CanonicalDocument) -> CanonicalDocument:
     renumbered_tables: list[TableResult] = []
     for page in sorted(tables_by_page):
         for table_index, table in enumerate(tables_by_page[page], start=1):
-            copied = table.model_copy(deep=True)
-            copied.table_id = f"p{page:04d}-t{table_index:04d}"
-            for cell_index, cell in enumerate(copied.cells, start=1):
-                cell.cell_id = f"{copied.table_id}-c{cell_index:04d}"
-            renumbered_tables.append(copied)
+            copied_table = table.model_copy(deep=True)
+            copied_table.table_id = f"p{page:04d}-t{table_index:04d}"
+            for cell_index, cell in enumerate(copied_table.cells, start=1):
+                cell.cell_id = f"{copied_table.table_id}-c{cell_index:04d}"
+            renumbered_tables.append(copied_table)
 
     return document.model_copy(
         update={"blocks": renumbered_blocks, "tables": renumbered_tables}

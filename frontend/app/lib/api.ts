@@ -3,25 +3,38 @@ import type {
   DocumentDetail,
   DocumentListResponse,
   HealthStatus,
+  FinancialCorrection,
+  FinancialReviewHistory,
+  FinancialReviewRecord,
+  FinancialStructureDecision,
+  FinancialResult,
   PageResult,
   PageSummary,
   RetryMode,
   SessionStatus,
+  TranslationCorrection,
+  TranslationReviewHistory,
+  TranslationReviewRecord,
 } from "../types";
 import {
   isDocumentCreateResponse,
   isDocumentDetail,
   isDocumentListResponse,
   isHealthStatus,
+  isFinancialResult,
+  isFinancialReviewHistory,
+  isFinancialReviewRecord,
   isPageResult,
   isPageSummaryArray,
   isSessionStatus,
+  isTranslationReviewHistory,
+  isTranslationReviewRecord,
 } from "./validation";
 
-export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
-
-/** Local-only bearer token. Never place production secrets in NEXT_PUBLIC_*. */
-const API_AUTH_TOKEN = (process.env.NEXT_PUBLIC_API_AUTH_TOKEN ?? "").trim();
+export const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "/api/backend").replace(
+  /\/$/,
+  "",
+);
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -47,14 +60,6 @@ function endpoint(path: string): string {
     throw new Error("The Python backend is not connected. Set NEXT_PUBLIC_API_BASE_URL to enable real uploads.");
   }
   return API_BASE + path;
-}
-
-function authHeaders(init?: HeadersInit): Headers {
-  const headers = new Headers(init);
-  if (API_AUTH_TOKEN && !headers.has("Authorization")) {
-    headers.set("Authorization", "Bearer " + API_AUTH_TOKEN);
-  }
-  return headers;
 }
 
 /**
@@ -117,8 +122,7 @@ async function performRequest(
   }
 
   try {
-    const headers = authHeaders(init?.headers);
-    const response = await fetch(endpoint(path), { ...init, headers, signal: controller.signal });
+    const response = await fetch(endpoint(path), { ...init, signal: controller.signal });
     if (!response.ok) {
       let message = "Request failed with status " + response.status + ".";
       try {
@@ -232,14 +236,111 @@ export function getPage(
 export function listPageSummaries(
   documentId: string,
   options?: RequestOptions,
+  view: "all" | "financial" | "review" = "all",
 ): Promise<PageSummary[]> {
   return apiFetch(
-    documentPath(documentId, "/pages"),
+    documentPath(documentId, "/pages?view=" + encodeURIComponent(view)),
     isPageSummaryArray,
     "page list",
     undefined,
     options,
   );
+}
+
+export function getFinancialResult(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<FinancialResult> {
+  return apiFetch(
+    documentPath(documentId, "/financial-result"),
+    isFinancialResult,
+    "financial result",
+    undefined,
+    options,
+  );
+}
+
+export function getFinancialReviews(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<FinancialReviewHistory> {
+  return apiFetch(
+    documentPath(documentId, "/financial-reviews"),
+    isFinancialReviewHistory,
+    "financial review history",
+    undefined,
+    options,
+  );
+}
+
+export function createFinancialReview(
+  documentId: string,
+  review: {
+    decision: "approved" | "rejected";
+    note?: string | null;
+    corrections: FinancialCorrection[];
+    structure_decisions: FinancialStructureDecision[];
+  },
+  options?: RequestOptions,
+): Promise<FinancialReviewRecord> {
+  return apiFetch(
+    documentPath(documentId, "/financial-reviews"),
+    isFinancialReviewRecord,
+    "financial review decision",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(review),
+    },
+    options,
+  );
+}
+
+export function getTranslationReviews(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<TranslationReviewHistory> {
+  return apiFetch(
+    documentPath(documentId, "/translation-reviews"),
+    isTranslationReviewHistory,
+    "translation review history",
+    undefined,
+    options,
+  );
+}
+
+export function createTranslationReview(
+  documentId: string,
+  review: {
+    decision: "approved" | "rejected";
+    note?: string | null;
+    corrections: TranslationCorrection[];
+  },
+  options?: RequestOptions,
+): Promise<TranslationReviewRecord> {
+  return apiFetch(
+    documentPath(documentId, "/translation-reviews"),
+    isTranslationReviewRecord,
+    "translation review decision",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(review),
+    },
+    options,
+  );
+}
+
+export async function getBilingualDocument(
+  documentId: string,
+  options?: RequestOptions,
+): Promise<Record<string, unknown>> {
+  const response = await performRequest(
+    documentPath(documentId, "/downloads/bilingual"),
+    undefined,
+    options,
+  );
+  return (await response.json()) as Record<string, unknown>;
 }
 
 export function listDocuments(
@@ -282,7 +383,16 @@ export function sourceUrl(documentId: string): string {
  */
 export function downloadUrl(
   documentId: string,
-  artifact: "page" | "extracted" | "bilingual",
+  artifact:
+    | "page"
+    | "extracted"
+    | "bilingual"
+    | "reviewed-bilingual"
+    | "manifest"
+    | "financial"
+    | "financial-csv"
+    | "financial-xlsx"
+    | "financial-validation",
   pageNumber?: number,
 ): string {
   const query = artifact === "page" && pageNumber ? "?page=" + pageNumber : "";
@@ -304,7 +414,16 @@ export async function fetchSourceBlobUrl(
 
 export async function downloadArtifact(
   documentId: string,
-  artifact: "page" | "extracted" | "bilingual",
+  artifact:
+    | "page"
+    | "extracted"
+    | "bilingual"
+    | "reviewed-bilingual"
+    | "manifest"
+    | "financial"
+    | "financial-csv"
+    | "financial-xlsx"
+    | "financial-validation",
   pageNumber?: number,
   options?: RequestOptions,
 ): Promise<void> {
@@ -374,5 +493,7 @@ export function isTerminal(status: DocumentDetail["status"]): boolean {
 }
 
 export function hasApiAuthToken(): boolean {
-  return Boolean(API_AUTH_TOKEN);
+  // The server-side backend proxy owns authentication. The browser must never
+  // receive or inspect the shared local API credential.
+  return Boolean(API_BASE);
 }

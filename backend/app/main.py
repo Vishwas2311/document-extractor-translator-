@@ -39,8 +39,8 @@ app = FastAPI(
     title=settings.app_name,
     version="0.2.0",
     description=(
-        "Arabic and Chinese (Simplified/Traditional) document extraction and English "
-        "translation. Local PRD-ready build: authenticated API, processing profiles, "
+        "Multilingual document extraction and detected non-English to English translation. "
+        "Local production-oriented evaluation build: authenticated API, processing profiles, "
         "synthetic/de-identified data only unless an approved exception is configured."
     ),
     lifespan=lifespan,

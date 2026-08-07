@@ -23,8 +23,17 @@ from app.core.exceptions import (
     JobNotFoundError,
     JobSupersededError,
 )
+from app.core.versioning import CURRENT_PROCESSING_VERSION
+from app.models.audit_event import AuditEvent
 from app.models.document import Document
+from app.models.financial_review import FinancialReview
 from app.models.processing_job import ProcessingJob
+from app.models.translation_review import TranslationReview
+from app.core.authorization import (
+    ROLE_REVIEWER,
+    AuthPrincipal,
+    can_list_organization,
+)
 
 CLAIMABLE_JOB_STATUSES = {JobStatus.QUEUED.value, JobStatus.RUNNING.value}
 
@@ -41,23 +50,140 @@ class DocumentRepository:
             await session.refresh(document)
             return document
 
+    async def list(
+        self,
+        page: int,
+        page_size: int,
+        *,
+        principal: AuthPrincipal | None = None,
+    ) -> tuple[Sequence[Document], int]:
+        async with self.session_factory() as session:
+            filters = []
+            if principal is not None:
+                filters.append(Document.organization_id == principal.organization_id)
+                if not can_list_organization(principal):
+                    if principal.has_role(ROLE_REVIEWER):
+                        filters.append(
+                            or_(
+                                Document.owner_subject == principal.subject,
+                                Document.assigned_reviewer_subject == principal.subject,
+                                Document.document_review_status.in_(
+                                    ["needs_review", "in_review", "draft"]
+                                ),
+                                Document.status == DocumentStatus.NEEDS_REVIEW.value,
+                            )
+                        )
+                    else:
+                        filters.append(Document.owner_subject == principal.subject)
+            count_stmt = select(func.count()).select_from(Document)
+            list_stmt = select(Document)
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+                list_stmt = list_stmt.where(*filters)
+            total = await session.scalar(count_stmt) or 0
+            result = await session.scalars(
+                list_stmt.order_by(Document.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            return result.all(), total
+
+    async def create_translation_review(self, review: TranslationReview) -> TranslationReview:
+        async with self.session_factory() as session:
+            document = await session.get(Document, review.document_id)
+            if document is None:
+                raise DocumentNotFoundError("Document was not found.")
+            if DocumentStatus(document.status) not in {
+                DocumentStatus.COMPLETED,
+                DocumentStatus.NEEDS_REVIEW,
+            }:
+                raise ConflictError(
+                    "Translation review is available only after processing completes."
+                )
+            if document.processing_version != review.processing_version:
+                raise ConflictError(
+                    "The translation result no longer matches the active processing version."
+                )
+            if document.translation_result_sha256 != review.result_sha256:
+                raise ConflictError(
+                    "The translation result changed before the review could be saved."
+                )
+            session.add(review)
+            document.translation_review_status = review.decision
+            document.translation_reviewed_by = review.reviewer_subject
+            document.translation_reviewed_at = review.created_at
+            if review.decision == "approved":
+                document.document_review_status = "approved"
+                if document.status == DocumentStatus.NEEDS_REVIEW.value:
+                    document.status = DocumentStatus.COMPLETED.value
+                    document.current_stage = DocumentStatus.COMPLETED.value
+            else:
+                document.document_review_status = "rejected"
+                document.status = DocumentStatus.NEEDS_REVIEW.value
+                document.current_stage = DocumentStatus.NEEDS_REVIEW.value
+            document.updated_at = review.created_at
+            await session.commit()
+            await session.refresh(review)
+            return review
+
+    async def translation_reviews(self, document_id: str) -> Sequence[TranslationReview]:
+        async with self.session_factory() as session:
+            if await session.get(Document, document_id) is None:
+                raise DocumentNotFoundError("Document was not found.")
+            result = await session.scalars(
+                select(TranslationReview)
+                .where(TranslationReview.document_id == document_id)
+                .order_by(TranslationReview.created_at.desc(), TranslationReview.id.desc())
+            )
+            return list(result.all())
+
+    async def create_audit_event(self, event: AuditEvent) -> AuditEvent:
+        async with self.session_factory() as session:
+            session.add(event)
+            await session.commit()
+            await session.refresh(event)
+            return event
+
+    async def list_audit_events(
+        self,
+        *,
+        organization_id: str,
+        limit: int = 100,
+    ) -> Sequence[AuditEvent]:
+        async with self.session_factory() as session:
+            result = await session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.organization_id == organization_id)
+                .order_by(AuditEvent.created_at.desc())
+                .limit(limit)
+            )
+            return list(result.all())
+
+    async def assign_reviewer(
+        self,
+        document_id: str,
+        *,
+        reviewer_subject: str,
+    ) -> Document:
+        async with self.session_factory() as session:
+            document = await session.get(Document, document_id)
+            if document is None:
+                raise DocumentNotFoundError("Document was not found.")
+            document.assigned_reviewer_subject = reviewer_subject
+            document.assignment_status = "assigned"
+            if document.document_review_status == "draft":
+                document.document_review_status = "needs_review"
+            document.updated_at = datetime.now(UTC)
+            await session.commit()
+            await session.refresh(document)
+            return document
+
     async def get(self, document_id: str) -> Document:
         async with self.session_factory() as session:
             document = await session.get(Document, document_id)
             if document is None:
                 raise DocumentNotFoundError("Document was not found.")
             return document
-
-    async def list(self, page: int, page_size: int) -> tuple[Sequence[Document], int]:
-        async with self.session_factory() as session:
-            total = await session.scalar(select(func.count()).select_from(Document)) or 0
-            result = await session.scalars(
-                select(Document)
-                .order_by(Document.created_at.desc())
-                .offset((page - 1) * page_size)
-                .limit(page_size)
-            )
-            return result.all(), total
 
     async def update_document(self, document_id: str, **values: object) -> None:
         values["updated_at"] = datetime.now(UTC)
@@ -143,6 +269,54 @@ class DocumentRepository:
     async def latest_job(self, document_id: str) -> ProcessingJob:
         async with self.session_factory() as session:
             return await self._latest_job_locked(session, document_id)
+
+    async def create_financial_review(self, review: FinancialReview) -> FinancialReview:
+        """Append an audit decision and update the document's current review summary."""
+        async with self.session_factory() as session:
+            document = await session.get(Document, review.document_id)
+            if document is None:
+                raise DocumentNotFoundError("Document was not found.")
+            if DocumentStatus(document.status) not in {
+                DocumentStatus.COMPLETED,
+                DocumentStatus.NEEDS_REVIEW,
+            }:
+                raise ConflictError(
+                    "Financial review is available only after processing completes."
+                )
+            if document.processing_version != review.processing_version:
+                raise ConflictError(
+                    "The financial result no longer matches the active processing version."
+                )
+            if document.financial_result_sha256 != review.result_sha256:
+                raise ConflictError(
+                    "The financial result changed before the review could be saved."
+                )
+            session.add(review)
+            document.financial_review_status = review.decision
+            document.financial_reviewed_by = review.reviewer_subject
+            document.financial_reviewed_at = review.created_at
+            # Financial approval is one review dimension. It must not clear an
+            # existing document-level review requirement raised by OCR or
+            # translation validation. A rejection, however, always makes the
+            # active document reviewable.
+            if review.decision == "rejected":
+                document.status = DocumentStatus.NEEDS_REVIEW.value
+                document.current_stage = DocumentStatus.NEEDS_REVIEW.value
+            document.updated_at = review.created_at
+            await session.commit()
+            await session.refresh(review)
+            return review
+
+    async def financial_reviews(self, document_id: str) -> Sequence[FinancialReview]:
+        async with self.session_factory() as session:
+            if await session.get(Document, document_id) is None:
+                raise DocumentNotFoundError("Document was not found.")
+            result = await session.scalars(
+                select(FinancialReview)
+                .where(FinancialReview.document_id == document_id)
+                .order_by(FinancialReview.created_at.desc(), FinancialReview.id.desc())
+            )
+            return list(result.all())
 
     async def update_job(self, job_id: str, **values: object) -> None:
         async with self.session_factory() as session:
@@ -429,6 +603,40 @@ class DocumentRepository:
     ) -> ProcessingJob:
         """Transition a document back to queued and enqueue a retry job, atomically."""
         retriable = [status.value for status in RETRIABLE_DOCUMENT_STATUSES]
+        document_values: dict[str, object] = {
+            "status": DocumentStatus.QUEUED.value,
+            "current_stage": "queued",
+            "progress_percent": 0,
+            "error_code": None,
+            "safe_error_message": None,
+            "completed_at": None,
+            "updated_at": datetime.now(UTC),
+            "processing_version": CURRENT_PROCESSING_VERSION,
+        }
+        if mode == RetryMode.REPROCESS:
+            document_values.update(
+                {
+                    "pages_ready": 0,
+                    "translation_batches_done": None,
+                    "translation_batches_total": None,
+                    "financial_page_count": None,
+                    "uncertain_page_count": None,
+                    "financial_table_count": None,
+                    "financial_issue_count": None,
+                    "financial_result_sha256": None,
+                    "financial_review_status": None,
+                    "financial_reviewed_by": None,
+                    "financial_reviewed_at": None,
+                    "source_languages": [],
+                }
+            )
+        elif mode == RetryMode.RETRANSLATE:
+            document_values.update(
+                {
+                    "translation_batches_done": None,
+                    "translation_batches_total": None,
+                }
+            )
         async with self.session_factory() as session:
             result = cast(
                 CursorResult[Any],
@@ -438,15 +646,7 @@ class DocumentRepository:
                         Document.id == document_id,
                         Document.status.in_(retriable),
                     )
-                    .values(
-                        status=DocumentStatus.QUEUED.value,
-                        current_stage="queued",
-                        progress_percent=0,
-                        error_code=None,
-                        safe_error_message=None,
-                        completed_at=None,
-                        updated_at=datetime.now(UTC),
-                    )
+                    .values(**document_values)
                 ),
             )
             if result.rowcount == 0:

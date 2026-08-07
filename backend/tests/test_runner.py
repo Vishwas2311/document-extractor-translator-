@@ -29,7 +29,7 @@ class FakeRepo:
     async def recoverable_document_ids(self) -> list[str]:
         return []
 
-    async def get(self, document_id: str):
+    async def get(self, document_id: str) -> SimpleNamespace:
         return SimpleNamespace(id=document_id, status=self.status)
 
 

@@ -56,7 +56,8 @@ class SecurityGateway:
                 and self._risk_rank(requested) > self._risk_rank(default)
             ):
                 raise PolicyBlockedError(
-                    "The client cannot select a higher-risk processing profile than the server allows.",
+                    "The client cannot select a higher-risk processing profile than "
+                    "the server allows.",
                     details={"requested": requested.value, "allowed": default.value},
                 )
             profile = requested
@@ -97,7 +98,8 @@ class SecurityGateway:
 
         if profile == ProcessingProfile.MANAGED_NO_LLM:
             raise PolicyBlockedError(
-                "MANAGED_NO_LLM is selected; generative translation is not available in this build.",
+                "MANAGED_NO_LLM is selected; generative translation is not available "
+                "in this build.",
                 details={"profile": profile.value},
             )
 

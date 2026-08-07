@@ -120,7 +120,11 @@ class DocumentIntelligenceAnalyzer:
                 payload = result.as_dict()
                 result_id = _result_id_from_poller(poller)
                 if result_id:
-                    await self._delete_analyze_result(client, result_id)
+                    await self._delete_analyze_result(
+                        client,
+                        self.settings.azure_document_intelligence_model_id,
+                        result_id,
+                    )
                 else:
                     await logger.awarning("di_result_id_missing_skip_delete")
                 return payload
@@ -138,14 +142,79 @@ class DocumentIntelligenceAnalyzer:
 
         return await _once()
 
-    async def _delete_analyze_result(self, client: DocumentIntelligenceClient, result_id: str) -> None:
+    async def classify(
+        self,
+        source_path: Path,
+        *,
+        classifier_id: str,
+        split_mode: str,
+        pages: str | None = None,
+    ) -> dict[str, Any]:
+        """Classify source pages with an approved Azure DI custom classifier."""
+        if not classifier_id.strip():
+            raise ConfigurationError("A Document Intelligence classifier ID is required.")
+        client = await self._get_client()
+
+        @retry(
+            reraise=True,
+            stop=stop_after_attempt(self.settings.azure_max_retries),
+            wait=wait_exponential(multiplier=1, min=1, max=20),
+            retry=retry_if_exception_type(AzureServiceError),
+        )
+        async def _once() -> dict[str, Any]:
+            try:
+                with source_path.open("rb") as source:
+                    poller = await client.begin_classify_document(
+                        classifier_id,
+                        body=source,
+                        split=split_mode,
+                        pages=pages,
+                    )
+                    result = await poller.result()
+                payload = result.as_dict()
+                result_id = _result_id_from_poller(poller)
+                if result_id:
+                    # Classifier results use the documentClassifiers route. The current
+                    # SDK/REST surface has no classifier-result deletion operation.
+                    await logger.awarning(
+                        "di_classifier_result_delete_unsupported",
+                        classifier_id=classifier_id,
+                        result_id=result_id,
+                    )
+                else:
+                    await logger.awarning("di_classifier_result_id_missing_skip_delete")
+                return payload
+            except ConfigurationError:
+                raise
+            except AzureServiceError:
+                raise
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", None)
+                retryable = status_code in {408, 429, 500, 502, 503, 504}
+                raise AzureServiceError(
+                    "Azure Document Intelligence classification failed.",
+                    retryable=retryable,
+                ) from exc
+
+        return await _once()
+
+    async def _delete_analyze_result(
+        self,
+        client: DocumentIntelligenceClient,
+        model_id: str,
+        result_id: str,
+    ) -> None:
         try:
             delete = getattr(client, "delete_analyze_result", None)
             if delete is None:
                 await logger.awarning("di_delete_analyze_result_unsupported")
                 return
-            await delete(result_id)
-            await logger.ainfo("di_analyze_result_deleted", result_id=result_id)
+            await delete(model_id, result_id)
+            await logger.ainfo(
+                "di_analyze_result_deleted",
+                model_id=model_id,
+                result_id=result_id,
+            )
         except Exception:
             await logger.aexception("di_analyze_result_delete_failed", result_id=result_id)
 

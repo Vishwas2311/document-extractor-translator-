@@ -24,6 +24,24 @@ class DocumentSummary(BaseModel):
     pages_ready: int | None = None
     translation_batches_done: int | None = None
     translation_batches_total: int | None = None
+    financial_extraction_mode: str = "post_extract"
+    financial_page_count: int | None = None
+    uncertain_page_count: int | None = None
+    financial_table_count: int | None = None
+    financial_issue_count: int | None = None
+    financial_result_sha256: str | None = None
+    financial_review_status: str | None = None
+    financial_reviewed_by: str | None = None
+    financial_reviewed_at: datetime | None = None
+    organization_id: str = "org-local"
+    owner_subject: str = "local-api-token"
+    assigned_reviewer_subject: str | None = None
+    assignment_status: str = "unassigned"
+    document_review_status: str = "draft"
+    translation_result_sha256: str | None = None
+    translation_review_status: str | None = None
+    translation_reviewed_by: str | None = None
+    translation_reviewed_at: datetime | None = None
     source_languages: list[str] = Field(default_factory=list)
     target_language: str
     data_class: str = "synthetic"
@@ -74,3 +92,10 @@ class PageSummary(BaseModel):
     block_count: int
     table_count: int
     review_required: bool = False
+    financial_label: str | None = None
+    financial_confidence: float | None = None
+    financial_disposition: str | None = None
+    financial_selected: bool = False
+    financial_reason: list[str] = Field(default_factory=list)
+    financial_table_count: int = 0
+    validation_issue_count: int = 0

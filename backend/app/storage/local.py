@@ -72,11 +72,76 @@ class LocalArtifactStorage:
         async with aiofiles.open(target, encoding="utf-8") as handle:
             return cast(dict[str, Any], json.loads(await handle.read()))
 
+    async def write_text(
+        self,
+        document_id: str,
+        relative_path: str,
+        content: str,
+    ) -> Path:
+        return await self._write_content(
+            document_id,
+            relative_path,
+            content,
+            binary=False,
+        )
+
+    async def write_bytes(
+        self,
+        document_id: str,
+        relative_path: str,
+        content: bytes,
+    ) -> Path:
+        return await self._write_content(
+            document_id,
+            relative_path,
+            content,
+            binary=True,
+        )
+
+    async def _write_content(
+        self,
+        document_id: str,
+        relative_path: str,
+        content: str | bytes,
+        *,
+        binary: bool,
+    ) -> Path:
+        target = self._artifact_path(document_id, relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        mode = "wb" if binary else "w"
+        kwargs = {} if binary else {"encoding": "utf-8", "newline": ""}
+        try:
+            async with aiofiles.open(temporary, mode, **kwargs) as handle:
+                await handle.write(content)
+                await handle.flush()
+            os.replace(temporary, target)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return target
+
     def exists(self, document_id: str, relative_path: str) -> bool:
         return self._artifact_path(document_id, relative_path).exists()
 
     def artifact_path(self, document_id: str, relative_path: str) -> Path:
         return self._artifact_path(document_id, relative_path)
+
+    async def delete_artifact(self, document_id: str, relative_path: str) -> None:
+        target = self._artifact_path(document_id, relative_path)
+        if target.is_dir():
+            await asyncio.to_thread(shutil.rmtree, target)
+        else:
+            target.unlink(missing_ok=True)
+
+    async def delete_prefix(self, document_id: str, relative_prefix: str) -> None:
+        """Delete one exact derived-artifact subtree without following unsafe paths."""
+        target = self._artifact_path(document_id, relative_prefix)
+        if target.exists():
+            if target.is_dir():
+                await asyncio.to_thread(shutil.rmtree, target)
+            else:
+                target.unlink(missing_ok=True)
 
     async def delete_document(self, document_id: str) -> None:
         target = self.document_dir(document_id)
