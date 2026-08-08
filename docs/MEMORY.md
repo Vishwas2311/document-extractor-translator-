@@ -82,7 +82,7 @@ production target, not a local claim.
 ### Frontend
 
 - React `19.2.6`.
-- Next-compatible application structure using Next `16.2.6` and Vinext `0.0.50`.
+- Next-compatible application structure using Next `16.3.0` and Vinext `1.0.0-beta.5`.
 - Vite `8.0.13` toolchain.
 - PDF.js-based PDF preview.
 - Browser polling for processing state.
