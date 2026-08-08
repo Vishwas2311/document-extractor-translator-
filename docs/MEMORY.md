@@ -313,8 +313,16 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
 8. Some UI security or service-status language is static and must not be treated as deployment evidence.
 9. Production observability, cost controls, alerts, and operational runbooks are missing.
 10. CI release gates, SBOM generation, container scanning, and deployment evidence are not established.
-11. Frontend and Python production dependencies have reviewed lock artifacts and currently audit
-    clean, but CI SBOM/container vulnerability gates are not established.
+11. Frontend and Python production dependencies have reviewed lock artifacts, but CI SBOM/container
+    vulnerability gates are not established. `npm audit` currently reports 2 high-severity findings
+    (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq) in `image-size`, a transitive dependency of `vinext`.
+    No patched version exists upstream as of 2026-08-08. Verified the vulnerable code (vinext's
+    file-based `app/icon.*`/`app/favicon.*`/`app/apple-icon.*` metadata-route generation) is not
+    reachable in this app: no such files exist under `frontend/app/`; the favicon is served as a
+    plain static path (`frontend/app/layout.tsx`) instead. Do not run `npm audit fix --force` to
+    "fix" this — it downgrades `vinext` to `0.0.45`, well below the version this project requires.
+    Re-check `npm audit` on the next dependency update pass; revisit if `frontend/app/` ever adds a
+    file-based icon/favicon/opengraph-image convention.
 12. Tenant isolation, object-level authorization, and production audit trails are not implemented.
 13. The backend enforces a processing profile and implements optional financial classification,
     but the production policy service, deployment allowlist, and operational kill switch are not
@@ -333,8 +341,10 @@ The following results describe the inspected revision only:
 
 - Current backend gate: Ruff passed, Mypy passed for 74 source files, and 119 tests passed.
 - Current frontend gate: production build passed; two rendered HTML tests passed; lint had zero errors and two existing image-element warnings.
-- Current frontend production dependency audit: zero known vulnerabilities after upgrading Next.js
-  and its matching lint configuration to 16.3.0.
+- Current frontend production dependency audit (2026-08-08, after upgrading `vinext` to
+  `1.0.0-beta.5` and Next.js/lint config to 16.3.0): 2 high-severity `npm audit` findings in
+  `image-size` (transitive via `vinext`), no upstream patch available; confirmed unreachable in
+  this app's build — see section 12, item 11.
 - Alembic upgraded from base through `0007_financial_structure_reviews` and downgraded to base successfully on a disposable SQLite database.
 - Repository CI and P2 deployment evidence are not established.
 
