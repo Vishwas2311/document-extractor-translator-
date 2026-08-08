@@ -314,15 +314,20 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
 9. Production observability, cost controls, alerts, and operational runbooks are missing.
 10. CI release gates, SBOM generation, container scanning, and deployment evidence are not established.
 11. Frontend and Python production dependencies have reviewed lock artifacts, but CI SBOM/container
-    vulnerability gates are not established. `npm audit` currently reports 2 high-severity findings
+    vulnerability gates are not established. `npm audit` reports 2 high-severity findings
     (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq) in `image-size`, a transitive dependency of `vinext`.
-    No patched version exists upstream as of 2026-08-08. Verified the vulnerable code (vinext's
-    file-based `app/icon.*`/`app/favicon.*`/`app/apple-icon.*` metadata-route generation) is not
-    reachable in this app: no such files exist under `frontend/app/`; the favicon is served as a
-    plain static path (`frontend/app/layout.tsx`) instead. Do not run `npm audit fix --force` to
-    "fix" this — it downgrades `vinext` to `0.0.45`, well below the version this project requires.
-    Re-check `npm audit` on the next dependency update pass; revisit if `frontend/app/` ever adds a
-    file-based icon/favicon/opengraph-image convention.
+    No patched version exists upstream as of 2026-08-08 (both advisories report
+    `first_patched_version: null`), and `npm audit` will keep reporting them regardless of the fix
+    below, since it checks the declared package version, not patched file contents. The vulnerable
+    code (vinext's file-based `app/icon.*`/`app/favicon.*`/`app/apple-icon.*` metadata-route
+    generation) is not reachable in this app — no such files exist under `frontend/app/`; the
+    favicon is a plain static path (`frontend/app/layout.tsx`) instead — but as defense-in-depth the
+    actual infinite-loop bugs in `image-size`'s ICNS/HEIF/JXL parsers are patched via
+    `frontend/patches/image-size+2.0.2.patch` (`patch-package`, auto-applied on `npm install` via
+    the `postinstall` script). Do not run `npm audit fix --force` to "fix" this — it downgrades
+    `vinext` to `0.0.45`, well below the version this project requires. Re-check `npm audit` on the
+    next dependency update pass; once a real upstream fix ships, drop the patch and bump the
+    version instead.
 12. Tenant isolation, object-level authorization, and production audit trails are not implemented.
 13. The backend enforces a processing profile and implements optional financial classification,
     but the production policy service, deployment allowlist, and operational kill switch are not
