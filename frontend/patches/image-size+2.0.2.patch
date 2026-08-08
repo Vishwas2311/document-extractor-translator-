@@ -1,0 +1,80 @@
+diff --git a/node_modules/image-size/dist/types/heif.cjs b/node_modules/image-size/dist/types/heif.cjs
+index 1f49078..d20fd0b 100644
+--- a/node_modules/image-size/dist/types/heif.cjs
++++ b/node_modules/image-size/dist/types/heif.cjs
+@@ -58,7 +58,7 @@ var HEIF = {
+     let currentOffset = ipcoBox.offset + 8;
+     while (currentOffset < ipcoBox.offset + ipcoBox.size) {
+       const ispeBox = findBox(input, "ispe", currentOffset);
+-      if (!ispeBox) break;
++      if (!ispeBox || ispeBox.size <= 0) break;
+       const rawWidth = readUInt32BE(input, ispeBox.offset + 12);
+       const rawHeight = readUInt32BE(input, ispeBox.offset + 16);
+       const clapBox = findBox(input, "clap", currentOffset);
+diff --git a/node_modules/image-size/dist/types/heif.mjs b/node_modules/image-size/dist/types/heif.mjs
+index 0133091..7e959de 100644
+--- a/node_modules/image-size/dist/types/heif.mjs
++++ b/node_modules/image-size/dist/types/heif.mjs
+@@ -56,7 +56,7 @@ var HEIF = {
+     let currentOffset = ipcoBox.offset + 8;
+     while (currentOffset < ipcoBox.offset + ipcoBox.size) {
+       const ispeBox = findBox(input, "ispe", currentOffset);
+-      if (!ispeBox) break;
++      if (!ispeBox || ispeBox.size <= 0) break;
+       const rawWidth = readUInt32BE(input, ispeBox.offset + 12);
+       const rawHeight = readUInt32BE(input, ispeBox.offset + 16);
+       const clapBox = findBox(input, "clap", currentOffset);
+diff --git a/node_modules/image-size/dist/types/icns.cjs b/node_modules/image-size/dist/types/icns.cjs
+index 32c8d37..ee73574 100644
+--- a/node_modules/image-size/dist/types/icns.cjs
++++ b/node_modules/image-size/dist/types/icns.cjs
+@@ -72,6 +72,9 @@ var ICNS = {
+     const images = [];
+     while (imageOffset < fileLength && imageOffset < inputLength) {
+       const imageHeader = readImageHeader(input, imageOffset);
++      if (imageHeader[1] <= 0) {
++        break;
++      }
+       const imageSize = getImageSize(imageHeader[0]);
+       images.push(imageSize);
+       imageOffset += imageHeader[1];
+diff --git a/node_modules/image-size/dist/types/icns.mjs b/node_modules/image-size/dist/types/icns.mjs
+index 8710027..7da923b 100644
+--- a/node_modules/image-size/dist/types/icns.mjs
++++ b/node_modules/image-size/dist/types/icns.mjs
+@@ -70,6 +70,9 @@ var ICNS = {
+     const images = [];
+     while (imageOffset < fileLength && imageOffset < inputLength) {
+       const imageHeader = readImageHeader(input, imageOffset);
++      if (imageHeader[1] <= 0) {
++        break;
++      }
+       const imageSize = getImageSize(imageHeader[0]);
+       images.push(imageSize);
+       imageOffset += imageHeader[1];
+diff --git a/node_modules/image-size/dist/types/jxl.cjs b/node_modules/image-size/dist/types/jxl.cjs
+index a12095b..09c0778 100644
+--- a/node_modules/image-size/dist/types/jxl.cjs
++++ b/node_modules/image-size/dist/types/jxl.cjs
+@@ -115,7 +115,7 @@ function extractPartialStreams(input) {
+   let offset = 0;
+   while (offset < input.length) {
+     const jxlpBox = findBox(input, "jxlp", offset);
+-    if (!jxlpBox) break;
++    if (!jxlpBox || jxlpBox.size <= 0) break;
+     partialStreams.push(
+       input.slice(jxlpBox.offset + 12, jxlpBox.offset + jxlpBox.size)
+     );
+diff --git a/node_modules/image-size/dist/types/jxl.mjs b/node_modules/image-size/dist/types/jxl.mjs
+index 49b0c4c..6cc22f2 100644
+--- a/node_modules/image-size/dist/types/jxl.mjs
++++ b/node_modules/image-size/dist/types/jxl.mjs
+@@ -113,7 +113,7 @@ function extractPartialStreams(input) {
+   let offset = 0;
+   while (offset < input.length) {
+     const jxlpBox = findBox(input, "jxlp", offset);
+-    if (!jxlpBox) break;
++    if (!jxlpBox || jxlpBox.size <= 0) break;
+     partialStreams.push(
+       input.slice(jxlpBox.offset + 12, jxlpBox.offset + jxlpBox.size)
+     );

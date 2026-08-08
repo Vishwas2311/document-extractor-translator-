@@ -10,7 +10,8 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern public/pdf.worker.min.mjs"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern public/pdf.worker.min.mjs",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "next": "16.3.0",
@@ -28,6 +29,7 @@
     "@vitejs/plugin-rsc": "0.5.34",
     "eslint": "9.39.5",
     "eslint-config-next": "16.3.0",
+    "patch-package": "8.0.1",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3",
