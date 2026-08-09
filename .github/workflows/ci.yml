@@ -22,7 +22,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.lock.txt -r requirements-dev.txt
+          # Two separate invocations: requirements.lock.txt is hash-pinned
+          # (--generate-hashes), and pip's hash-checking mode is triggered by the
+          # mere presence of any hash and then demands hashes + exact "==" pins for
+          # every requirement in the *same* install command - including
+          # requirements-dev.txt's unpinned/unhashed dev tools if combined here.
+          pip install -r requirements.lock.txt
+          pip install -r requirements-dev.txt
 
       - name: Lint (ruff)
         run: ruff check app tests
