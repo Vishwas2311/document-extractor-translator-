@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     ocr_review_threshold: float = Field(default=0.85, ge=0, le=1)
     azure_max_retries: int = 3
     azure_request_timeout_seconds: int = 180
+    # Ceiling on a single poller.result() long-running-operation wait. The SDK's
+    # per-HTTP-request timeout (above) doesn't bound this - a poller that keeps
+    # getting "still running" responses can hang indefinitely otherwise.
+    azure_operation_max_seconds: int = Field(default=300, ge=1, le=1800)
     processing_concurrency: int = 2
     # Long 300-page jobs need a longer lease than the historical 5-minute default.
     job_lease_seconds: int = 900

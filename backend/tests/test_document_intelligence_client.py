@@ -87,14 +87,60 @@ class FakeDocumentIntelligenceClient:
         self.deleted.append((model_id, result_id))
 
 
-def make_settings(tmp_path: Path) -> Settings:
+def make_settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(
         database_url=f"sqlite+aiosqlite:///{(tmp_path / 'db.sqlite').as_posix()}",
         storage_root=tmp_path / "storage",
         azure_document_intelligence_endpoint="https://example.test",
         azure_document_intelligence_api_key="synthetic-test-key",
         azure_document_intelligence_model_id="prebuilt-layout",
+        **overrides,
     )
+
+
+class HangingThenFastPoller:
+    """A poller whose `.result()` never returns on the first `hang_times` calls to
+    the *class-level* counter, simulating Azure's long-running-operation poll loop
+    getting stuck on "still running" with no exception ever raised - the real bug
+    behind a document that stays at the same progress percent indefinitely."""
+
+    details = {"result_id": "result-123"}
+    calls = 0
+    hang_times = 0
+
+    async def result(self) -> FakeResult:
+        type(self).calls += 1
+        if type(self).calls <= type(self).hang_times:
+            await asyncio.sleep(3600)  # would hang forever without a wait_for ceiling
+        return FakeResult()
+
+
+class HangingDocumentIntelligenceClient:
+    """`begin_analyze_document`/`begin_classify_document` return instantly (matching
+    the real SDK), but the returned poller's `.result()` hangs - isolating the bug to
+    exactly where it lives: the long-running-operation wait, not the initial request."""
+
+    def __init__(self, poller_cls: type[HangingThenFastPoller]) -> None:
+        self.poller_cls = poller_cls
+
+    async def begin_analyze_document(self, model_id: str, **_: Any) -> HangingThenFastPoller:
+        return self.poller_cls()
+
+    async def begin_classify_document(self, classifier_id: str, **_: Any) -> HangingThenFastPoller:
+        return self.poller_cls()
+
+    async def delete_analyze_result(self, model_id: str, result_id: str) -> None:
+        pass
+
+
+class OneHangPoller(HangingThenFastPoller):
+    calls = 0
+    hang_times = 1
+
+
+class AlwaysHangPoller(HangingThenFastPoller):
+    calls = 0
+    hang_times = 999
 
 
 @pytest.mark.asyncio
@@ -220,6 +266,46 @@ async def test_classify_retries_a_transport_level_timeout(tmp_path: Path) -> Non
 
     assert result == {"pages": []}
     assert client.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_analyze_times_out_a_hanging_poller_result_and_retries(tmp_path: Path) -> None:
+    """The real bug behind a document stuck at the same progress percent forever:
+    `begin_analyze_document` returns fine, but the poller's `.result()` (Azure's
+    long-running-operation wait) never resolves and never raises. Without a wait_for
+    ceiling, `analyze()` would hang indefinitely with no exception for the retry
+    decorator to even see. With the fix, a hang past azure_operation_max_seconds
+    must surface as a retryable timeout, and a later attempt must still succeed."""
+    source = tmp_path / "synthetic.pdf"
+    source.write_bytes(b"%PDF-synthetic")
+    settings = make_settings(tmp_path, azure_operation_max_seconds=1)
+    analyzer = DocumentIntelligenceAnalyzer(settings)
+    OneHangPoller.calls = 0
+    client = HangingDocumentIntelligenceClient(OneHangPoller)
+    analyzer._client = client  # type: ignore[assignment]
+
+    result = await asyncio.wait_for(analyzer.analyze(source), timeout=10)
+
+    assert result == {"pages": []}
+    assert OneHangPoller.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_analyze_gives_up_after_repeated_hangs(tmp_path: Path) -> None:
+    """A poller that never recovers must eventually surface a clean, bounded failure
+    (retries exhausted) rather than hang forever - the whole point of the fix."""
+    source = tmp_path / "synthetic.pdf"
+    source.write_bytes(b"%PDF-synthetic")
+    settings = make_settings(tmp_path, azure_operation_max_seconds=1)
+    analyzer = DocumentIntelligenceAnalyzer(settings)
+    AlwaysHangPoller.calls = 0
+    client = HangingDocumentIntelligenceClient(AlwaysHangPoller)
+    analyzer._client = client  # type: ignore[assignment]
+
+    with pytest.raises(AzureServiceError):
+        await asyncio.wait_for(analyzer.analyze(source), timeout=10)
+
+    assert AlwaysHangPoller.calls == settings.azure_max_retries
 
 
 @pytest.mark.asyncio
