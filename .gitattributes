@@ -1,0 +1,24 @@
+# Force LF for text so behavior is consistent regardless of a contributor's local
+# core.autocrlf setting.
+* text=auto eol=lf
+
+# True binary formats - must never go through line-ending conversion. Without this,
+# core.autocrlf=true (the Windows git default) silently corrupts these on checkout
+# for any file git's own binary-detection heuristic doesn't reliably catch (verified:
+# it missed docs/reports/tell me.pdf, inflating it by 165 bytes on a fresh clone).
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.wasm binary
+*.ttf binary
+*.pfb binary
+*.bcmap binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.otf binary
+*.zip binary
