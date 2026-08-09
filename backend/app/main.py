@@ -3,8 +3,11 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
 from app.core.config import get_settings
@@ -67,7 +70,7 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     public_details = {
         key: value
         for key, value in exc.details.items()
-        if key in {"profile", "requested", "allowed", "data_class", "reason"}
+        if key in {"profile", "requested", "allowed", "data_class", "reason", "service"}
     }
     return JSONResponse(
         status_code=exc.status_code,
@@ -77,6 +80,104 @@ async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
             "request_id": getattr(request.state, "request_id", "unknown"),
             "retryable": getattr(exc, "retryable", False),
             "details": public_details,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+_SAFE_STATUS_MESSAGES = {
+    400: "The request could not be understood. Please check your input and try again.",
+    401: "Authentication is required to access this resource.",
+    403: "You don't have permission to perform this action.",
+    404: "The requested resource was not found.",
+    405: "This action is not supported.",
+    409: "This action conflicts with the current state of the resource.",
+    413: "The uploaded file exceeds the allowed size.",
+    415: "The uploaded file type is not supported.",
+    422: "The request was invalid. Please check your input and try again.",
+    429: "Too many requests. Please slow down and try again shortly.",
+}
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "unknown")
+    await logger.awarning(
+        "request_validation_failed",
+        request_id=request_id,
+        path=request.url.path,
+        error_count=len(exc.errors()),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "validation_error",
+            "message": _SAFE_STATUS_MESSAGES[422],
+            "request_id": request_id,
+            "retryable": False,
+            "details": {},
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(
+    request: Request, exc: StarletteHTTPException
+) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "unknown")
+    if exc.status_code >= 500:
+        await logger.aexception(
+            "unhandled_http_exception",
+            request_id=request_id,
+            path=request.url.path,
+            status_code=exc.status_code,
+        )
+    else:
+        await logger.awarning(
+            "http_exception",
+            request_id=request_id,
+            path=request.url.path,
+            status_code=exc.status_code,
+        )
+    message = _SAFE_STATUS_MESSAGES.get(
+        exc.status_code, "The request could not be completed."
+    )
+    # Starlette's router raises HTTPException(405, headers={"Allow": "..."}) on a
+    # method-not-allowed match, per RFC 7231 - preserve any headers the exception
+    # carried (our own no-store directive still wins if it collides).
+    headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "code": "http_error",
+            "message": message,
+            "request_id": request_id,
+            "retryable": False,
+            "details": {},
+        },
+        headers=headers,
+    )
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+    request_id = getattr(request.state, "request_id", "unknown")
+    await logger.awarning(
+        "database_integrity_error",
+        request_id=request_id,
+        path=request.url.path,
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "code": "conflict",
+            "message": _SAFE_STATUS_MESSAGES[409],
+            "request_id": request_id,
+            "retryable": False,
+            "details": {},
         },
         headers={"Cache-Control": "no-store"},
     )

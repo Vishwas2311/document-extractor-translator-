@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -9,12 +10,19 @@ from urllib.parse import urlparse
 import structlog
 from azure.ai.documentintelligence.aio import DocumentIntelligenceClient
 from azure.core.credentials import AzureKeyCredential
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import Settings
 from app.core.exceptions import AzureServiceError, ConfigurationError
 
 logger = structlog.get_logger(__name__)
+
+
+def _is_retryable_azure_error(exc: BaseException) -> bool:
+    """Only retry transient failures (408/429/5xx) - a 400/401/403 wrapped as
+    `AzureServiceError` is permanent and retrying it just delays the inevitable failure
+    while burning the Azure quota."""
+    return isinstance(exc, AzureServiceError) and getattr(exc, "retryable", False)
 
 
 def _result_id_from_poller(poller: Any) -> str | None:
@@ -57,6 +65,8 @@ class DocumentIntelligenceAnalyzer:
                 self._client = DocumentIntelligenceClient(
                     endpoint=endpoint,
                     credential=DefaultAzureCredential(),
+                    connection_timeout=self.settings.azure_request_timeout_seconds,
+                    read_timeout=self.settings.azure_request_timeout_seconds,
                 )
             elif mode == "api_key":
                 api_key = self.settings.azure_document_intelligence_api_key
@@ -67,6 +77,8 @@ class DocumentIntelligenceAnalyzer:
                 self._client = DocumentIntelligenceClient(
                     endpoint=endpoint,
                     credential=AzureKeyCredential(api_key),
+                    connection_timeout=self.settings.azure_request_timeout_seconds,
+                    read_timeout=self.settings.azure_request_timeout_seconds,
                 )
             else:
                 raise ConfigurationError(
@@ -105,7 +117,7 @@ class DocumentIntelligenceAnalyzer:
             reraise=True,
             stop=stop_after_attempt(self.settings.azure_max_retries),
             wait=wait_exponential(multiplier=1, min=1, max=20),
-            retry=retry_if_exception_type(AzureServiceError),
+            retry=retry_if_exception(_is_retryable_azure_error),
         )
         async def _once() -> dict[str, Any]:
             try:
@@ -120,10 +132,18 @@ class DocumentIntelligenceAnalyzer:
                 payload = result.as_dict()
                 result_id = _result_id_from_poller(poller)
                 if result_id:
-                    await self._delete_analyze_result(
-                        client,
-                        self.settings.azure_document_intelligence_model_id,
-                        result_id,
+                    # Fire-and-forget: this is server-side cleanup, not part of the
+                    # result. Awaiting it here would hold the caller's range-analysis
+                    # semaphore slot for one extra network round trip per range,
+                    # serializing cleanup against the next range's work for no reason.
+                    # `_delete_analyze_result` already catches and logs its own
+                    # exceptions, so a bare fire-and-forget task cannot leak or crash.
+                    asyncio.create_task(
+                        self._delete_analyze_result(
+                            client,
+                            self.settings.azure_document_intelligence_model_id,
+                            result_id,
+                        )
                     )
                 else:
                     await logger.awarning("di_result_id_missing_skip_delete")
@@ -134,7 +154,12 @@ class DocumentIntelligenceAnalyzer:
                 raise
             except Exception as exc:
                 status_code = getattr(exc, "status_code", None)
-                retryable = status_code in {408, 429, 500, 502, 503, 504}
+                # A transport-level failure (connection refused, DNS, or - critically -
+                # a timeout) never reaches the point of getting an HTTP status at all,
+                # so `status_code` is None here even though the failure is exactly the
+                # kind that's worth retrying. Only an *observed* permanent status
+                # (400/401/403/etc, not in the retryable set) should suppress retry.
+                retryable = status_code is None or status_code in {408, 429, 500, 502, 503, 504}
                 raise AzureServiceError(
                     "Azure Document Intelligence analysis failed.",
                     retryable=retryable,
@@ -159,7 +184,7 @@ class DocumentIntelligenceAnalyzer:
             reraise=True,
             stop=stop_after_attempt(self.settings.azure_max_retries),
             wait=wait_exponential(multiplier=1, min=1, max=20),
-            retry=retry_if_exception_type(AzureServiceError),
+            retry=retry_if_exception(_is_retryable_azure_error),
         )
         async def _once() -> dict[str, Any]:
             try:
@@ -190,7 +215,12 @@ class DocumentIntelligenceAnalyzer:
                 raise
             except Exception as exc:
                 status_code = getattr(exc, "status_code", None)
-                retryable = status_code in {408, 429, 500, 502, 503, 504}
+                # A transport-level failure (connection refused, DNS, or - critically -
+                # a timeout) never reaches the point of getting an HTTP status at all,
+                # so `status_code` is None here even though the failure is exactly the
+                # kind that's worth retrying. Only an *observed* permanent status
+                # (400/401/403/etc, not in the retryable set) should suppress retry.
+                retryable = status_code is None or status_code in {408, 429, 500, 502, 503, 504}
                 raise AzureServiceError(
                     "Azure Document Intelligence classification failed.",
                     retryable=retryable,

@@ -10,7 +10,6 @@ from typing import Any
 from app.core.exceptions import ConflictError, InvalidDocumentError
 from app.schemas.translation_review import TranslationCorrection, TranslationReviewCreate
 
-
 TRANSLATION_REVIEW_SCHEMA_VERSION = "translation-review-1.0"
 REVIEWED_BILINGUAL_PATH = "exports/reviewed-bilingual-document.json"
 

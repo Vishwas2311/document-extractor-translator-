@@ -1,5 +1,7 @@
 """Unit tests for local PRD-shaped authorization helpers."""
 
+import pytest
+
 from app.core.authorization import (
     ROLE_AUDITOR,
     ROLE_CASEWORKER,
@@ -10,7 +12,6 @@ from app.core.authorization import (
     require_document_access,
 )
 from app.core.exceptions import AuthorizationError
-import pytest
 
 
 def _principal(*, subject: str, roles: set[str], org: str = "org-local") -> AuthPrincipal:

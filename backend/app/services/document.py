@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import re
 from datetime import UTC, datetime
@@ -110,8 +111,12 @@ class DocumentService:
                 raise InvalidDocumentError("File extension does not match its content.")
             final_path = self.storage.source_path(document_id, detected_extension)
             temporary.replace(final_path)
-            page_estimate = assert_pdf_safe(
-                final_path, max_pages=self.settings.max_document_pages
+            # pypdf's page-tree walk is synchronous CPU-bound work; this app runs its
+            # background job workers as asyncio tasks on the same event loop as the
+            # HTTP server (see InProcessJobRunner), so an un-threaded parse here would
+            # stall every other concurrent request for its full duration.
+            page_estimate = await asyncio.to_thread(
+                assert_pdf_safe, final_path, max_pages=self.settings.max_document_pages
             )
         except Exception:
             temporary.unlink(missing_ok=True)

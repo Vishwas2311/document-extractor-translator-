@@ -19,6 +19,15 @@ from app.services.security_gateway import SecurityGateway
 from app.services.validation import TranslationValidator
 
 
+def _async_const(value: int | None) -> Any:
+    """Stub for `_estimate_pdf_pages`, which is async (offloaded to a thread)."""
+
+    async def _stub(path: Path) -> int | None:
+        return value
+
+    return _stub
+
+
 def _test_gateway() -> SecurityGateway:
     return SecurityGateway(
         Settings(
@@ -327,6 +336,101 @@ async def test_batch_translation_failure_is_isolated_per_block() -> None:
     assert second.translation_status == TranslationStatus.FAILED
     assert second.review_required
     assert any("Translation failed" in warning for warning in second.warnings)
+
+
+class MissingBlockIdTranslator:
+    """Returns a well-formed (200-status) response that simply omits one requested
+    block_id - the malformed-but-successful case, distinct from an API error."""
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text="EN: " + item.source_text)
+                for item in request.blocks
+                if item.block_id != "b0002"
+            ]
+        )
+
+
+class NoOpTranslationValidator:
+    """A validator that never raises - stands in for `TranslationValidator` to prove
+    the block-mapping code itself degrades gracefully on a missing block_id, rather
+    than relying solely on `TranslationValidator.validate()` (which already rejects an
+    ID-set mismatch before this code runs in the real, default-configured pipeline).
+    Defense in depth: if validation is ever relaxed, replaced, or misconfigured, a
+    missing block_id must still fail closed *for that block only*, not raise an
+    unhandled KeyError that takes down the whole document."""
+
+    def validate(self, inputs: list[object], response: TranslationBatchResponse) -> None:
+        return None
+
+
+async def test_batch_translation_missing_block_id_is_isolated_per_block() -> None:
+    storage = MemoryStorage()
+    service = _service(
+        storage=storage,
+        translator=MissingBlockIdTranslator(),
+        validator=NoOpTranslationValidator(),
+        max_batch_blocks=25,
+    )
+    document = CanonicalDocument(
+        document_id="doc-4",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(block_id="b0001", reading_order=1, source_text="مرحبا"),
+            TextBlock(block_id="b0002", reading_order=2, source_text="青年支持"),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    first, second = document.blocks
+    # A response missing one block_id doesn't crash or fail the whole batch - the
+    # block that *was* present in the response still translates normally.
+    assert first.translation_status == TranslationStatus.TRANSLATED
+    assert first.translated_text == "EN: مرحبا"
+    assert second.translation_status == TranslationStatus.FAILED
+    assert second.review_required
+    assert any("did not include this block" in warning for warning in second.warnings)
+
+
+async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -> None:
+    """Documents current, real behavior with the actual (non-stubbed)
+    `TranslationValidator`: it already rejects an ID-set mismatch before the
+    block-mapping code in `run_batch` ever runs, so a missing block_id fails the whole
+    *batch* it was requested in (not the whole document - other batches are
+    unaffected), via the pre-existing `TranslationValidationError` handling."""
+    storage = MemoryStorage()
+    service = _service(
+        storage=storage,
+        translator=MissingBlockIdTranslator(),
+        max_batch_blocks=25,
+    )
+    document = CanonicalDocument(
+        document_id="doc-5",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(block_id="b0001", reading_order=1, source_text="مرحبا"),
+            TextBlock(block_id="b0002", reading_order=2, source_text="青年支持"),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    first, second = document.blocks
+    assert first.translation_status == TranslationStatus.FAILED
+    assert second.translation_status == TranslationStatus.FAILED
+    assert any("Translation failed" in warning for warning in first.warnings)
 
 
 class MemoryRepository:
@@ -835,7 +939,7 @@ async def test_trusted_empty_mid_range_raises_instead_of_truncating() -> None:
         exporter=ExportService(),
         di_page_range_size=25,
     )
-    service._estimate_pdf_pages = lambda path: 50  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(50)  # type: ignore[method-assign]
 
     document_record = SimpleNamespace(
         original_filename="large.pdf",
@@ -875,7 +979,7 @@ async def test_trusted_short_mid_range_raises_instead_of_truncating() -> None:
         exporter=ExportService(),
         di_page_range_size=25,
     )
-    service._estimate_pdf_pages = lambda path: 100  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(100)  # type: ignore[method-assign]
 
     try:
         await service._extract_canonical(
@@ -914,7 +1018,7 @@ async def test_stored_page_count_used_when_reparse_misses() -> None:
         exporter=ExportService(),
         di_page_range_size=25,
     )
-    service._estimate_pdf_pages = lambda path: None  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(None)  # type: ignore[method-assign]
 
     canonical, page_numbers = await service._extract_canonical(
         "doc-stored",
@@ -953,7 +1057,7 @@ async def test_unknown_page_estimate_uses_ranges_not_single_shot() -> None:
         di_page_range_size=25,
         max_document_pages=200,
     )
-    service._estimate_pdf_pages = lambda path: None  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(None)  # type: ignore[method-assign]
 
     document_record = SimpleNamespace(
         original_filename="unknown.pdf",
@@ -994,7 +1098,7 @@ async def test_selective_extraction_requests_only_candidate_ranges() -> None:
         exporter=ExportService(),
         di_page_range_size=25,
     )
-    service._estimate_pdf_pages = lambda path: 50  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(50)  # type: ignore[method-assign]
 
     canonical, page_numbers = await service._extract_canonical(
         "doc-selective",
@@ -1038,7 +1142,7 @@ async def test_range_artifacts_are_span_keyed() -> None:
         exporter=ExportService(),
         di_page_range_size=25,
     )
-    service._estimate_pdf_pages = lambda path: 50  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(50)  # type: ignore[method-assign]
 
     await service._extract_canonical(
         "doc-span",
@@ -1116,7 +1220,9 @@ async def test_parallel_di_ranges_honor_concurrency_cap() -> None:
             self.calls: list[str | None] = []
             self._lock = asyncio.Lock()
 
-        async def analyze(self, source_path: Path, *, pages: str | None = None) -> dict:
+        async def analyze(
+            self, source_path: Path, *, pages: str | None = None
+        ) -> dict[str, Any]:
             async with self._lock:
                 self.calls.append(pages)
                 self.in_flight += 1
@@ -1143,7 +1249,7 @@ async def test_parallel_di_ranges_honor_concurrency_cap() -> None:
         di_range_concurrency=2,
         di_use_physical_chunks=False,
     )
-    service._estimate_pdf_pages = lambda path: 50  # type: ignore[assignment]
+    service._estimate_pdf_pages = _async_const(50)  # type: ignore[method-assign]
 
     await service._extract_canonical(
         "doc-parallel-di",
@@ -1157,4 +1263,4 @@ async def test_parallel_di_ranges_honor_concurrency_cap() -> None:
     )
 
     assert analyzer.max_in_flight == 2
-    assert sorted(analyzer.calls) == ["1-25", "26-50"]
+    assert sorted(call for call in analyzer.calls if call is not None) == ["1-25", "26-50"]

@@ -33,6 +33,8 @@ import {
   retryDocument,
   uploadDocument,
 } from "./lib/api";
+import { selectInspectorBanner } from "./lib/inspector-banner";
+import { describeError, useActionError } from "./lib/useActionError";
 import { PdfPage } from "./pdf-page";
 import type {
   BoundingRegion,
@@ -70,11 +72,14 @@ function fileExtension(filename: string): string {
 
 function validateUploadFile(file: File, maxUploadBytes = MAX_UPLOAD_BYTES_FALLBACK): string | null {
   if (!ALLOWED_UPLOAD_EXTENSIONS.has(fileExtension(file.name))) {
-    return "Unsupported file type. Upload PDF, PNG, JPEG, TIFF, or BMP.";
+    return "The selected file is not supported. Upload PDF, PNG, JPEG, TIFF, or BMP.";
+  }
+  if (file.size === 0) {
+    return "The selected file is empty.";
   }
   if (file.size > maxUploadBytes) {
     const limitMb = Math.round(maxUploadBytes / (1024 * 1024));
-    return `File exceeds the ${limitMb} MB upload limit.`;
+    return `The selected file exceeds the ${limitMb} MB upload limit.`;
   }
   return null;
 }
@@ -1026,6 +1031,7 @@ function DocumentListPanel({
   error,
   currentDocumentId,
   backendConnected,
+  deletingDocumentId,
   onClose,
   onOpen,
   onDelete,
@@ -1036,6 +1042,7 @@ function DocumentListPanel({
   error: string | null;
   currentDocumentId: string | null;
   backendConnected: boolean;
+  deletingDocumentId: string | null;
   onClose: () => void;
   onOpen: (documentId: string) => void;
   onDelete: (item: DocumentSummary) => void;
@@ -1081,6 +1088,10 @@ function DocumentListPanel({
               <button
                 aria-label={"Delete " + item.original_filename}
                 className="doc-panel-delete"
+                // handleDeleteDocument's guard is global (one delete in flight blocks
+                // all), so every row's button must reflect that - not just the one
+                // being deleted, or the others look clickable but silently no-op.
+                disabled={Boolean(deletingDocumentId)}
                 onClick={() => onDelete(item)}
                 type="button"
               >
@@ -1113,7 +1124,11 @@ export function DocumentStudio() {
   const [translationCorrections, setTranslationCorrections] = useState<Record<string, string>>({});
   const [translationReviewNote, setTranslationReviewNote] = useState("");
   const [translationReviewSubmitting, setTranslationReviewSubmitting] = useState(false);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const [downloadingArtifact, setDownloadingArtifact] = useState<string | null>(null);
   const [session, setSession] = useState<SessionStatus | null>(null);
+  const { error, errorRetry, sessionError, setActionError, reportApiError, clearSessionError } =
+    useActionError(setSession);
   const [pageView, setPageView] = useState<PageView>("financial");
   const [contentLanguageView, setContentLanguageView] =
     useState<ContentLanguageView>("source");
@@ -1127,7 +1142,6 @@ export function DocumentStudio() {
   const [rotation, setRotation] = useState(0);
   const [overlays, setOverlays] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -1236,6 +1250,19 @@ export function DocumentStudio() {
     return () => {
       activeRunRef.current?.abort();
     };
+  }, []);
+
+  // Last-resort net for a promise rejection that slipped past every try/catch in this
+  // file - guarantees it's never silently swallowed. Intentionally log-only, not a UI
+  // banner: for an error class that by definition wasn't anticipated, a banner here
+  // risks contradicting or duplicating whatever state-specific error the app already
+  // knows how to show.
+  useEffect(() => {
+    function onUnhandledRejection(event: PromiseRejectionEvent) {
+      console.error("Unhandled promise rejection:", event.reason);
+    }
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => window.removeEventListener("unhandledrejection", onUnhandledRejection);
   }, []);
 
   // Pre-flight check: without this, a document only reveals that translation isn't
@@ -1483,7 +1510,7 @@ export function DocumentStudio() {
       })
       .catch((caught: unknown) => {
         if (controller.signal.aborted) return;
-        setPageLoadError(caught instanceof Error ? caught.message : "This page could not be loaded.");
+        setPageLoadError(describeError(caught, "This page could not be loaded."));
       });
     return () => controller.abort();
   }, [document.demo, document.id, currentPage, pageCache, currentPageReady]);
@@ -1737,9 +1764,23 @@ export function DocumentStudio() {
 
     await refreshPagesIfNeeded(latest, true);
 
+    const maxConsecutivePollFailures = 5;
+    let consecutivePollFailures = 0;
+
     while (!isTerminal(latest.status) && Date.now() < pollDeadline) {
       await wait(delayMs, signal);
-      latest = await getDocument(documentId, { signal });
+      try {
+        latest = await getDocument(documentId, { signal });
+        consecutivePollFailures = 0;
+      } catch (pollError) {
+        if (signal.aborted) return;
+        consecutivePollFailures += 1;
+        // A single dropped connection or backend restart mid-poll shouldn't freeze the
+        // UI on a stale "still processing" state - keep polling through transient
+        // blips, and only surface the failure once it's clearly not transient.
+        if (consecutivePollFailures >= maxConsecutivePollFailures) throw pollError;
+        continue;
+      }
       if (signal.aborted) return;
       setDocument(latest);
       await refreshPagesIfNeeded(latest);
@@ -1769,17 +1810,17 @@ export function DocumentStudio() {
     // `disabled={busy}` - without this, dropping a second file mid-upload starts a
     // second poll loop that interleaves state updates with the first.
     if (busy) return;
-    setError(null);
+    setActionError(null);
     setInfo(null);
     const maxUploadBytes =
       (health?.limits?.max_upload_size_mb ?? 150) * 1024 * 1024;
     const validationError = validateUploadFile(file, maxUploadBytes);
     if (validationError) {
-      setError(validationError);
+      setActionError(validationError);
       return;
     }
     if (!API_BASE) {
-      setError("Backend not connected. Copy .env.local.example to .env.local and run the Python API before uploading.");
+      setActionError("Backend not connected. Copy .env.local.example to .env.local and run the Python API before uploading.");
       return;
     }
     activeRunRef.current?.abort();
@@ -1807,7 +1848,9 @@ export function DocumentStudio() {
       await followJob(created.document_id, controller.signal);
     } catch (caught) {
       if (controller.signal.aborted) return;
-      setError(caught instanceof Error ? caught.message : "The document could not be processed.");
+      await reportApiError(caught, "The document could not be processed.", {
+        retry: () => void processFile(file),
+      });
     } finally {
       if (activeRunRef.current === controller) {
         activeRunRef.current = null;
@@ -1822,15 +1865,15 @@ export function DocumentStudio() {
       activeRunRef.current = null;
       setBusy(false);
       setInfo("Cancelled.");
-      setError(null);
+      setActionError(null);
       return;
     }
     if (!API_BASE || !document.id) {
-      setError("Backend not connected. Cancel could not be sent to the server.");
+      setActionError("Backend not connected. Cancel could not be sent to the server.");
       return;
     }
     const documentId = document.id;
-    setError(null);
+    setActionError(null);
     setInfo(null);
     setBusy(true);
     try {
@@ -1841,7 +1884,7 @@ export function DocumentStudio() {
       setDocument(latest);
       setInfo(latest.safe_error_message ?? "Processing was cancelled. You can retry when ready.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Cancel failed.");
+      await reportApiError(caught, "Cancel failed.");
       // Keep polling if cancel failed and work is still running.
       if (!isTerminal(document.status) && !activeRunRef.current) {
         const controller = new AbortController();
@@ -1866,7 +1909,7 @@ export function DocumentStudio() {
   async function openDocument(documentId: string) {
     if (busy) return;
     setIsDocumentListOpen(false);
-    setError(null);
+    setActionError(null);
     activeRunRef.current?.abort();
     const controller = new AbortController();
     activeRunRef.current = controller;
@@ -1888,7 +1931,7 @@ export function DocumentStudio() {
       }
     } catch (caught) {
       if (controller.signal.aborted) return;
-      setError(caught instanceof Error ? caught.message : "The document could not be opened.");
+      await reportApiError(caught, "The document could not be opened.");
     } finally {
       if (activeRunRef.current === controller) {
         activeRunRef.current = null;
@@ -1911,29 +1954,36 @@ export function DocumentStudio() {
       const response = await listDocuments(1, 50);
       setDocumentList(response.items);
     } catch (caught) {
-      setDocumentListError(caught instanceof Error ? caught.message : "Documents could not be loaded.");
+      setDocumentListError(describeError(caught, "Documents could not be loaded."));
     } finally {
       setDocumentListLoading(false);
     }
   }
 
   async function handleDeleteDocument(item: DocumentSummary) {
+    if (deletingDocumentId) return;
     if (!window.confirm(`Delete "${item.original_filename}"? This cannot be undone.`)) return;
+    setDeletingDocumentId(item.id);
+    // A stale error/Retry banner from an earlier action could otherwise point at the
+    // document we're about to delete.
+    setActionError(null);
     try {
       await deleteDocument(item.id);
       setDocumentList((items) => items.filter((candidate) => candidate.id !== item.id));
       if (document.id === item.id) {
         activeRunRef.current?.abort();
+        // Falling back to the demo document must clear every piece of the deleted
+        // document's state, not just the page-viewer bits - otherwise its financial
+        // extraction/review data keeps rendering on top of the demo doc.
+        resetPageState();
         setDocument(demoDocument);
         setPages(demoPages);
-        setPageSummaries([]);
-        setPageCache({});
-        setPageLoadError(null);
-        setCurrentPage(1);
         setSelectedId(demoPages[0].blocks[0].block_id);
       }
     } catch (caught) {
-      setDocumentListError(caught instanceof Error ? caught.message : "The document could not be deleted.");
+      setDocumentListError(describeError(caught, "The document could not be deleted."));
+    } finally {
+      setDeletingDocumentId(null);
     }
   }
 
@@ -1956,7 +2006,7 @@ export function DocumentStudio() {
     const controller = new AbortController();
     activeRunRef.current = controller;
     setBusy(true);
-    setError(null);
+    setActionError(null);
     try {
       await retryDocument(document.id, "resume", { signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -1966,7 +2016,7 @@ export function DocumentStudio() {
       await followJob(document.id, controller.signal);
     } catch (caught) {
       if (controller.signal.aborted) return;
-      setError(caught instanceof Error ? caught.message : "Retry failed.");
+      await reportApiError(caught, "Retry failed.", { retry: () => void handleRetry() });
     } finally {
       if (activeRunRef.current === controller) {
         activeRunRef.current = null;
@@ -1976,36 +2026,33 @@ export function DocumentStudio() {
   }
 
   async function handleDownload(
-    artifact:
-      | "page"
-      | "extracted"
-      | "bilingual"
-      | "reviewed-bilingual"
-      | "manifest"
-      | "financial"
-      | "financial-csv"
-      | "financial-xlsx",
+    artifact: "reviewed-bilingual" | "financial" | "financial-xlsx",
   ) {
+    if (downloadingArtifact) return;
+    setActionError(null);
     if (document.demo) {
       const payload =
-        artifact === "page"
-          ? page
-          : artifact === "financial"
-            ? financialResult ?? { document_id: document.id, tables: [] }
-            : { ...document, pages };
+        artifact === "financial"
+          ? financialResult ?? { document_id: document.id, tables: [] }
+          : { ...document, pages };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const link = window.document.createElement("a");
       link.href = url;
-      link.download = artifact === "page" ? "demo-page-" + currentPage + ".json" : "demo-" + artifact + ".json";
+      link.download = "demo-" + artifact + ".json";
       link.click();
       URL.revokeObjectURL(url);
       return;
     }
+    setDownloadingArtifact(artifact);
     try {
       await downloadArtifact(document.id, artifact, currentPage);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Download failed.");
+      await reportApiError(caught, "Download failed.", {
+        retry: () => void handleDownload(artifact),
+      });
+    } finally {
+      setDownloadingArtifact(null);
     }
   }
 
@@ -2050,15 +2097,15 @@ export function DocumentStudio() {
       (candidateId) => financialStructureDecisions[candidateId] !== "accepted",
     );
     if (decision === "approved" && unresolvedCells.length) {
-      setError("Resolve every required monetary amount and currency before approval.");
+      setActionError("Resolve every required monetary amount and currency before approval.");
       return;
     }
     if (decision === "approved" && unresolvedStructures.length) {
-      setError("Accept every reconstructed table structure before approval.");
+      setActionError("Accept every reconstructed table structure before approval.");
       return;
     }
     setFinancialReviewSubmitting(true);
-    setError(null);
+    setActionError(null);
     try {
       const persisted = await createFinancialReview(document.id, {
         decision,
@@ -2082,7 +2129,7 @@ export function DocumentStudio() {
           : "Financial result rejected and audit record saved.",
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Financial review could not be saved.");
+      await reportApiError(caught, "Financial review could not be saved.");
     } finally {
       setFinancialReviewSubmitting(false);
     }
@@ -2091,7 +2138,7 @@ export function DocumentStudio() {
   async function handleTranslationReview(decision: "approved" | "rejected") {
     if (document.demo || translationReviewSubmitting) return;
     setTranslationReviewSubmitting(true);
-    setError(null);
+    setActionError(null);
     try {
       let corrections = Object.entries(translationCorrections)
         .filter(([, text]) => text.trim())
@@ -2184,7 +2231,7 @@ export function DocumentStudio() {
           return !entry;
         });
         if (stillMissing.length) {
-          setError("Resolve every review-flagged translation before approval.");
+          setActionError("Resolve every review-flagged translation before approval.");
           return;
         }
       }
@@ -2211,9 +2258,7 @@ export function DocumentStudio() {
           : "Translation rejected and audit record saved.",
       );
     } catch (caught) {
-      setError(
-        caught instanceof Error ? caught.message : "Translation review could not be saved.",
-      );
+      await reportApiError(caught, "Translation review could not be saved.");
     } finally {
       setTranslationReviewSubmitting(false);
     }
@@ -2224,7 +2269,7 @@ export function DocumentStudio() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(page, null, 2));
     } catch {
-      setError("Clipboard copy failed. Check browser permissions and try again.");
+      setActionError("Clipboard copy failed. Check browser permissions and try again.");
     }
   }
 
@@ -2329,24 +2374,14 @@ export function DocumentStudio() {
             document.status === "cancelled") ? (
             <button className="secondary-button" disabled={busy} onClick={() => void handleRetry()}><Icon name="refresh" /> Retry</button>
           ) : null}
-          <button className="secondary-button" disabled={!page} onClick={() => void handleDownload("page")}><Icon name="download" /> Page JSON</button>
-          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial")}><Icon name="download" /> Financial JSON</button>
-          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial-csv")}><Icon name="download" /> CSV</button>
-          <button className="secondary-button" disabled={!financialResult} onClick={() => void handleDownload("financial-xlsx")}><Icon name="download" /> XLSX</button>
-          <button className="secondary-button export-button" disabled={!page || document.demo} onClick={() => void handleDownload("bilingual")}><Icon name="download" /> Machine bilingual</button>
+          <button className="secondary-button" disabled={!financialResult || !!downloadingArtifact} onClick={() => void handleDownload("financial")}><Icon name="download" /> Financial JSON</button>
+          <button className="secondary-button" disabled={!financialResult || !!downloadingArtifact} onClick={() => void handleDownload("financial-xlsx")}><Icon name="download" /> XLSX</button>
           <button
             className="secondary-button export-button"
-            disabled={document.demo || document.document_review_status !== "approved"}
+            disabled={document.demo || document.document_review_status !== "approved" || !!downloadingArtifact}
             onClick={() => void handleDownload("reviewed-bilingual")}
           >
             <Icon name="download" /> Approved bilingual
-          </button>
-          <button
-            className="secondary-button"
-            disabled={document.demo || !isTerminal(document.status)}
-            onClick={() => void handleDownload("manifest")}
-          >
-            <Icon name="download" /> Manifest
           </button>
           <button className="secondary-button" onClick={() => void openDocumentListPanel()}>
             <Icon name="folder" /> Recent
@@ -2363,6 +2398,7 @@ export function DocumentStudio() {
       <DocumentListPanel
         backendConnected={Boolean(API_BASE)}
         currentDocumentId={document.demo ? null : document.id}
+        deletingDocumentId={deletingDocumentId}
         error={documentListError}
         items={documentList}
         loading={documentListLoading}
@@ -2401,9 +2437,28 @@ export function DocumentStudio() {
         </div>
       ) : null}
 
+      {sessionError ? (
+        <div className="error-bar session-error-bar" role="alert">
+          <span>!</span><strong>Authentication problem</strong><p>{sessionError}</p>
+          <button onClick={() => clearSessionError()}>Dismiss</button>
+        </div>
+      ) : null}
+
       {error ? (
         <div className="error-bar" role="alert">
-          <span>!</span><strong>Action needed</strong><p>{error}</p><button onClick={() => setError(null)}>Dismiss</button>
+          <span>!</span><strong>Action needed</strong><p>{error}</p>
+          {errorRetry ? (
+            <button
+              onClick={() => {
+                const retry = errorRetry;
+                setActionError(null);
+                retry();
+              }}
+            >
+              Retry
+            </button>
+          ) : null}
+          <button onClick={() => setActionError(null)}>Dismiss</button>
         </div>
       ) : null}
 
@@ -2695,48 +2750,90 @@ export function DocumentStudio() {
 
         <aside className="inspector-panel">
           <div className="inspector-content" ref={inspectorContentRef}>
-            {activeTab !== "json" && document.status === "failed" && document.safe_error_message ? (
-              <div className="translation-status-message" role="status">
-                <strong>{page ? "Translation unavailable" : "Extraction unavailable"}</strong>
-                <span>{document.safe_error_message}</span>
-              </div>
-            ) : null}
+            {(() => {
+              const inspectorBanner = selectInspectorBanner({
+                activeTab,
+                hasFinancialContent: Boolean(currentFinancialContentItems.length),
+                isDemo: Boolean(document.demo),
+                hasPage: Boolean(page),
+                pageLoadError,
+                hasActionError: Boolean(error),
+                documentStatus: document.status,
+                pageCount: document.page_count ?? null,
+                currentPageReady,
+                financialExcluded: currentPageSummary?.financial_selected === false,
+                safeErrorMessage: document.safe_error_message ?? null,
+              });
+
+              if (inspectorBanner === "unavailable") {
+                return (
+                  <div className="translation-status-message" role="status">
+                    <strong>{page ? "Translation unavailable" : "Extraction unavailable"}</strong>
+                    <span>{document.safe_error_message}</span>
+                  </div>
+                );
+              }
+              if (inspectorBanner === "excluded") {
+                return (
+                  <div className="page-loading-message financial-page-excluded" role="status">
+                    <strong>Detailed extraction was not run for page {currentPage}</strong>
+                    <span>
+                      Classified as {currentPageSummary?.financial_label ?? "non-financial"}
+                      {currentPageSummary?.financial_confidence != null
+                        ? ` · ${Math.round(currentPageSummary.financial_confidence * 100)}% confidence`
+                        : ""}.
+                    </span>
+                  </div>
+                );
+              }
+              if (inspectorBanner === "extracting") {
+                return (
+                  <div className="page-loading-message" role="status">
+                    <strong>Page {currentPage} is still extracting…</strong>
+                    <span>Source preview is available now. Extracted text appears when this page finishes OCR.</span>
+                  </div>
+                );
+              }
+              if (inspectorBanner === "loading") {
+                return (
+                  <div className="page-loading-message" role="status">
+                    <strong>Loading page {currentPage}…</strong>
+                    <span>Fetching extracted and translated content for this page.</span>
+                  </div>
+                );
+              }
+              if (inspectorBanner === "empty") {
+                return (
+                  <div className="page-loading-message" role="status">
+                    <strong>No page content is available for page {currentPage}</strong>
+                    <span>
+                      {document.safe_error_message ??
+                        "Processing finished without producing extracted content for this page."}
+                    </span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
 
             {!document.demo &&
-            !page &&
-            !pageLoadError &&
-            currentPageSummary?.financial_selected === false ? (
-              <div className="page-loading-message financial-page-excluded" role="status">
-                <strong>Detailed extraction was not run for page {currentPage}</strong>
-                <span>
-                  Classified as {currentPageSummary.financial_label ?? "non-financial"}
-                  {currentPageSummary.financial_confidence != null
-                    ? ` · ${Math.round(currentPageSummary.financial_confidence * 100)}% confidence`
-                    : ""}.
-                </span>
-              </div>
-            ) : null}
-
-            {!document.demo &&
-            !page &&
-            !pageLoadError &&
-            document.page_count &&
-            !currentPageReady &&
-            currentPageSummary?.financial_selected !== false ? (
-              <div className="page-loading-message" role="status">
-                <strong>Page {currentPage} is still extracting…</strong>
-                <span>Source preview is available now. Extracted text appears when this page finishes OCR.</span>
-              </div>
-            ) : null}
-
-            {!document.demo && !page && !pageLoadError && currentPageReady && document.page_count ? (
-              <div className="page-loading-message" role="status">
-                <strong>Loading page {currentPage}…</strong>
-                <span>Fetching extracted and translated content for this page.</span>
-              </div>
-            ) : null}
-
-            {!document.demo && pageLoadError ? (
+            pageLoadError &&
+            // A whole-document failure banner ("unavailable") already covers this
+            // state and takes priority - don't stack a second, page-scoped banner on
+            // top of it.
+            selectInspectorBanner({
+              activeTab,
+              hasFinancialContent: Boolean(currentFinancialContentItems.length),
+              isDemo: Boolean(document.demo),
+              hasPage: Boolean(page),
+              pageLoadError,
+              hasActionError: Boolean(error),
+              documentStatus: document.status,
+              pageCount: document.page_count ?? null,
+              currentPageReady,
+              financialExcluded: currentPageSummary?.financial_selected === false,
+              safeErrorMessage: document.safe_error_message ?? null,
+            }) !== "unavailable" ? (
               <div className="translation-status-message" role="alert">
                 <strong>Page {currentPage} could not be loaded</strong>
                 <span>{pageLoadError}</span>
@@ -2749,7 +2846,7 @@ export function DocumentStudio() {
                   <div>
                     <span className="eyebrow">Format-preserving financial extraction</span>
                     <strong>Financial document</strong>
-                    <span>
+                    <span className="financial-summary-meta">
                       Page {currentPage}: {currentFinancialContentItems.length} structured{" "}
                       {currentFinancialContentItems.length === 1 ? "item" : "items"}
                       {" · "}
@@ -3211,7 +3308,7 @@ export function DocumentStudio() {
                     <strong>
                       {contentLanguageView === "english" ? "Page English" : "Page source"}
                     </strong>
-                    <span>
+                    <span className="financial-summary-meta">
                       {standaloneBlocks.length} text regions · {page.tables.length} structured{" "}
                       {page.tables.length === 1 ? "table" : "tables"}
                       {" · "}Financial stream stays on the Financial tab
@@ -3391,7 +3488,7 @@ export function DocumentStudio() {
                 {!document.demo && isTerminal(document.status) ? (
                   <section className="financial-review-panel" aria-label="Translation review decision">
                     <strong>Translation reviewer decision</strong>
-                    <span>
+                    <span className="financial-summary-meta">
                       {document.translation_review_status
                         ? `Current status: ${document.translation_review_status}`
                         : "Approve after resolving review chips, or reject for rework."}

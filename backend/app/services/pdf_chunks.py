@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 def chunk_pdf_path(document_dir: Path, start: int, end: int) -> Path:
@@ -66,4 +66,7 @@ def remap_di_page_numbers(payload: dict[str, Any], *, page_offset: int) -> dict[
             return [walk(item) for item in node]
         return node
 
-    return walk(payload)
+    # `walk` recurses through arbitrarily-nested Any (dict/list/scalar); this call's
+    # input is a dict and the dict branch always returns a dict, so the result is safe
+    # to narrow back to the function's declared return type.
+    return cast(dict[str, Any], walk(payload))

@@ -14,11 +14,8 @@ from typing import Annotated, Any
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.authorization import (
-    ROLE_ORG_ADMIN,
-    AuthPrincipal,
-    normalize_roles,
-)
+from app.core.authorization import ROLE_ORG_ADMIN, normalize_roles
+from app.core.authorization import AuthPrincipal as AuthPrincipal
 from app.core.config import Settings
 from app.core.exceptions import AuthenticationError, AuthorizationError
 from app.dependencies.services import ServiceContainer

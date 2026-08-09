@@ -387,6 +387,16 @@ button:focus-visible {
   font-weight: 850;
 }
 
+.session-error-bar {
+  color: #7a4a0a;
+  background: #fff7ea;
+  border-bottom-color: #f3d9a4;
+}
+
+.session-error-bar > span:first-child {
+  background: var(--warning);
+}
+
 .error-bar p {
   margin: 0;
 }
@@ -1392,19 +1402,19 @@ button:focus-visible {
 
 .translation-status-message {
   display: grid;
-  gap: 4px;
-  margin: 12px;
-  padding: 11px 12px;
+  gap: 3px;
+  margin: 8px;
+  padding: 7px 8px;
   color: #762436;
   background: #fff0f2;
   border: 1px solid #efbdc5;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 8px;
   line-height: 1.45;
 }
 
 .translation-status-message strong {
-  font-size: 12px;
+  font-size: 10px;
 }
 
 .result-count {
@@ -1441,8 +1451,8 @@ button:focus-visible {
 .result-card {
   display: block;
   width: 100%;
-  margin: 0 0 9px;
-  padding: 11px;
+  margin: 0 0 6px;
+  padding: 8px;
   color: inherit;
   background: #fff;
   border: 1px solid #e2e8f0;
@@ -1529,14 +1539,42 @@ button:focus-visible {
 }
 
 .source-preview {
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 5px;
+  padding-top: 5px;
   overflow: hidden;
   color: #475569;
   border-top: 1px solid #eef2f6;
-  font-size: 10px;
+  font-size: 8px;
   line-height: 1.45;
   text-overflow: ellipsis;
+}
+
+.translation-correction-field {
+  display: grid;
+  gap: 3px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #eef2f6;
+  cursor: text;
+}
+
+.translation-correction-field > span {
+  color: var(--muted, #657084);
+  font-size: 7px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.translation-correction-field textarea {
+  width: 100%;
+  border: 1px solid var(--border, #c7ceda);
+  border-radius: 6px;
+  background: #fff;
+  color: inherit;
+  padding: 5px 6px;
+  font: inherit;
+  font-size: 9px;
+  resize: vertical;
 }
 
 .table-result {
@@ -1551,11 +1589,12 @@ button:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 11px;
+  /* padding set below at the later, cascade-winning .table-result-heading rule -
+     keeping it there only avoids a second place to update, not a design choice. */
   color: var(--brand-dark);
   background: var(--surface-teal);
   border-bottom: 1px solid #cbd5e1;
-  font-size: 10px;
+  font-size: 8px;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -1576,14 +1615,14 @@ button:focus-visible {
   width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 9px;
+  /* padding set below at the later, cascade-winning .table-cell-result rule. */
   color: inherit;
   background: #fff;
   border: 0;
   border-radius: 0;
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 7px;
   line-height: 1.4;
   text-align: left;
   transition: background 120ms ease, box-shadow 120ms ease;
@@ -1608,11 +1647,11 @@ button:focus-visible {
 }
 
 .table-cell-result > small {
-  margin-top: 5px;
-  padding-top: 5px;
+  margin-top: 3px;
+  padding-top: 3px;
   color: #475569;
   border-top: 1px solid #eef2f6;
-  font-size: 8px;
+  font-size: 6px;
 }
 
 .table-cell-result.needs-review {
@@ -2590,7 +2629,7 @@ button:focus-visible {
 .tab-list button {
   border: 1px solid transparent;
   border-radius: 8px;
-  font-size: 10px;
+  font-size: 8px;
   transition: color 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
@@ -2675,8 +2714,8 @@ button:focus-visible {
 .translation-text,
 .extracted-text {
   color: #0f172a;
-  font-size: 11px;
-  line-height: 1.55;
+  font-size: 9px;
+  line-height: 1.5;
 }
 
 .table-result {
@@ -2687,7 +2726,7 @@ button:focus-visible {
 }
 
 .table-result-heading {
-  padding: 10px 11px;
+  padding: 6px 8px;
   background: linear-gradient(135deg, #eaf1f8, #f7f8fa);
   border-bottom-color: #cbd5e1;
   letter-spacing: 0.035em;
@@ -2699,7 +2738,7 @@ button:focus-visible {
 }
 
 .table-cell-result {
-  padding: 10px;
+  padding: 6px;
 }
 
 .selection-footer {
@@ -3639,19 +3678,19 @@ button:focus-visible {
 
 .page-loading-message {
   display: grid;
-  gap: 4px;
-  margin: 12px;
-  padding: 11px 12px;
+  gap: 3px;
+  margin: 8px;
+  padding: 7px 8px;
   color: var(--brand-dark);
   background: var(--surface-teal);
   border: 1px solid #cbd5e1;
   border-radius: 8px;
-  font-size: 11px;
+  font-size: 8px;
   line-height: 1.45;
 }
 
 .page-loading-message strong {
-  font-size: 12px;
+  font-size: 10px;
 }
 
 /* Full-height page intelligence column: results from the top, controls mid-dock */
@@ -3762,14 +3801,14 @@ button:focus-visible {
 
 .inspector-dock-meta strong {
   color: #0f172a;
-  font-size: 14px;
+  font-size: 10px;
   font-weight: 750;
   letter-spacing: -0.01em;
 }
 
 .inspector-dock-meta strong span {
   color: #64748b;
-  font-size: 11px;
+  font-size: 8px;
   font-weight: 600;
 }
 
@@ -3910,54 +3949,72 @@ button:focus-visible {
 
 .financial-inspector {
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  gap: 8px;
+  padding: 10px;
 }
 
 .financial-summary-card,
 .financial-validation-list {
   display: grid;
-  gap: 6px;
-  padding: 14px;
+  gap: 4px;
+  padding: 8px;
   border: 1px solid var(--border, #d9dee8);
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f8f9fc;
 }
 
 .financial-summary-card {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 14px;
+  gap: 8px;
+}
+
+/* Distinguishes the Page tab's OCR summary card from the Financial tab's - same
+   layout, a teal accent (matching the app's existing page/table-result convention)
+   instead of the plain gray financial-tab background, so which tab you're on is
+   visible without reading the card text. */
+.page-ocr-summary {
+  border-color: #c9e4de;
+  background: var(--surface-teal);
 }
 
 .financial-summary-card > div:first-child {
   display: grid;
-  gap: 6px;
+  gap: 4px;
+}
+
+.financial-summary-card .eyebrow {
+  font-size: 8px;
 }
 
 .financial-summary-card strong {
-  font-size: 15px;
+  font-size: 10px;
+}
+
+.financial-summary-meta {
+  color: var(--muted, #657084);
+  font-size: 8px;
 }
 
 .financial-language-switcher {
   display: inline-grid;
   grid-template-columns: 1fr 1fr;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid var(--border, #d9dee8);
-  border-radius: 9px;
+  border-radius: 7px;
   background: #eef2f6;
 }
 
 .financial-language-switcher button {
-  min-height: 30px;
-  padding: 0 11px;
+  min-height: 20px;
+  padding: 0 7px;
   border: 0;
-  border-radius: 6px;
+  border-radius: 5px;
   background: transparent;
   color: var(--muted, #657084);
   cursor: pointer;
   font: inherit;
-  font-size: 11px;
+  font-size: 8px;
   font-weight: 750;
 }
 
@@ -3969,16 +4026,16 @@ button:focus-visible {
 
 .financial-document-flow {
   display: grid;
-  gap: 12px;
+  gap: 6px;
 }
 
 .financial-content-item {
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  gap: 6px;
+  padding: 8px;
   overflow: hidden;
   border: 1px solid var(--border, #d9dee8);
-  border-radius: 10px;
+  border-radius: 8px;
   background: #fff;
 }
 
@@ -3994,23 +4051,23 @@ button:focus-visible {
 .financial-content-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 3px;
   align-items: center;
   color: var(--muted, #657084);
-  font-size: 9px;
+  font-size: 6px;
   font-weight: 750;
   text-transform: uppercase;
 }
 
 .financial-content-item.is-table .financial-content-meta {
-  padding: 11px 12px 0;
+  padding: 6px 7px 0;
 }
 
 .financial-content-meta > span,
 .financial-content-page {
-  padding: 3px 6px;
+  padding: 2px 4px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   background: #eef2f6;
   color: inherit;
   font: inherit;
@@ -4036,13 +4093,13 @@ button:focus-visible {
 }
 
 .financial-content-item h3 {
-  font-size: 15px;
+  font-size: 11px;
   line-height: 1.35;
 }
 
 .financial-content-item p {
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 9px;
+  line-height: 1.5;
 }
 
 .financial-key-value {
@@ -4057,9 +4114,9 @@ button:focus-visible {
 .financial-key-value dt,
 .financial-key-value dd {
   margin: 0;
-  padding: 10px;
+  padding: 6px;
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 9px;
   line-height: 1.45;
 }
 
@@ -4085,19 +4142,19 @@ button:focus-visible {
 }
 
 .financial-source-original {
-  padding-top: 8px;
+  padding-top: 5px;
   color: var(--muted, #657084);
   border-top: 1px solid #eef2f6;
-  font-size: 10px !important;
+  font-size: 8px !important;
 }
 
 .financial-content-warnings {
   margin: 0;
-  padding: 8px 8px 8px 26px;
-  border-radius: 7px;
+  padding: 6px 6px 6px 20px;
+  border-radius: 6px;
   background: #fff7e8;
   color: #795700;
-  font-size: 10px;
+  font-size: 8px;
   line-height: 1.45;
 }
 
@@ -4150,17 +4207,21 @@ button:focus-visible {
 .table-reconciliation-review {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 8px;
+  gap: 5px;
   align-items: center;
-  padding: 10px;
+  padding: 6px;
   border-bottom: 1px solid var(--border, #d9dee8);
   background: #f1f8ff;
 }
 
 .table-reconciliation-review > div {
   display: grid;
-  gap: 3px;
-  font-size: 12px;
+  gap: 2px;
+  font-size: 9px;
+}
+
+.table-reconciliation-review > div > strong {
+  font-size: 10px;
 }
 
 .table-reconciliation-review > div > span {
@@ -4168,12 +4229,13 @@ button:focus-visible {
 }
 
 .table-reconciliation-review button {
-  min-height: 34px;
-  padding: 0 10px;
+  min-height: 22px;
+  padding: 0 8px;
   border: 1px solid #aeb8c8;
-  border-radius: 7px;
+  border-radius: 6px;
   background: #fff;
   color: inherit;
+  font-size: 9px;
   font-weight: 700;
 }
 
@@ -4192,24 +4254,24 @@ button:focus-visible {
 .table-reconciliation-review > .structure-decision-help {
   grid-column: 1 / -1;
   color: var(--muted, #657084);
-  font-size: 11px;
+  font-size: 8px;
 }
 
 .validation-issue {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 8px;
+  gap: 5px;
   align-items: start;
-  padding-top: 8px;
+  padding-top: 5px;
   border-top: 1px solid #e0e4ec;
 }
 
 .validation-issue > span {
-  padding: 2px 5px;
+  padding: 2px 4px;
   border-radius: 4px;
   background: #fff1cc;
   color: #795700;
-  font-size: 10px;
+  font-size: 7px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -4221,6 +4283,14 @@ button:focus-visible {
 
 .validation-issue p {
   margin: 0;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.financial-validation-list strong,
+.financial-correction-list strong,
+.financial-review-panel strong {
+  font-size: 10px;
 }
 
 .financial-page-excluded {
@@ -4231,10 +4301,10 @@ button:focus-visible {
 .financial-correction-list,
 .financial-review-panel {
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  gap: 6px;
+  padding: 8px;
   border: 1px solid var(--border, #d9dee8);
-  border-radius: 10px;
+  border-radius: 8px;
   background: #f8f9fc;
 }
 
@@ -4242,13 +4312,13 @@ button:focus-visible {
 .financial-review-panel > p {
   margin: 0;
   color: var(--muted, #657084);
-  font-size: 12px;
+  font-size: 9px;
 }
 
 .financial-correction-list label {
   display: grid;
-  gap: 6px;
-  font-size: 12px;
+  gap: 4px;
+  font-size: 9px;
 }
 
 .financial-correction-list input,
@@ -4256,11 +4326,12 @@ button:focus-visible {
 .financial-review-panel textarea {
   width: 100%;
   border: 1px solid var(--border, #c7ceda);
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
   color: inherit;
-  padding: 9px 10px;
+  padding: 6px 7px;
   font: inherit;
+  font-size: 9px;
 }
 
 @media (max-width: 720px) {
@@ -4270,28 +4341,29 @@ button:focus-visible {
 }
 
 .financial-review-panel textarea {
-  min-height: 72px;
+  min-height: 48px;
   resize: vertical;
 }
 
 .financial-review-actions {
   display: flex;
-  gap: 8px;
+  gap: 5px;
 }
 
 .financial-review-actions button {
-  min-height: 36px;
-  padding: 0 14px;
+  min-height: 24px;
+  padding: 0 10px;
   border: 1px solid var(--border, #c7ceda);
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff;
   color: inherit;
+  font-size: 9px;
   font-weight: 700;
 }
 
 .financial-review-history {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -4300,7 +4372,7 @@ button:focus-visible {
 .financial-review-history li {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 5px;
   color: var(--muted, #657084);
-  font-size: 11px;
+  font-size: 8px;
 }

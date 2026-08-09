@@ -1,11 +1,13 @@
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.enums import RetryMode
-from app.core.exceptions import ConflictError
+from app.core.exceptions import ConflictError, InvalidDocumentError
 from app.services.document import DocumentService
 from app.storage.local import LocalArtifactStorage
 
@@ -27,6 +29,26 @@ def test_detects_allowed_file_signatures(header: bytes, expected: tuple[str, str
 
 def test_rejects_unknown_file_signature() -> None:
     assert DocumentService._detect_type(b"not-a-document") is None
+
+
+async def test_create_upload_rejects_a_real_oversized_file_via_streaming_check(
+    tmp_path: Path,
+) -> None:
+    """Confirms the *actual* streaming per-chunk check in `create_upload` rejects an
+    oversized file before it's ever fully buffered - not just that the final-size
+    arithmetic would work out in theory."""
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    settings = Settings(auth_required=False, max_upload_size_mb=1)
+    service = DocumentService(settings, repository=None, storage=storage)  # type: ignore[arg-type]
+
+    oversized_payload = b"%PDF-1.7" + (b"\x00" * (2 * 1024 * 1024))  # ~2 MB > 1 MB limit
+    upload = UploadFile(filename="big.pdf", file=io.BytesIO(oversized_payload))
+
+    with pytest.raises(InvalidDocumentError, match="1 MB limit"):
+        await service.create_upload(upload)
+
+    # The partial temp file and document directory must not be left behind.
+    assert not any(storage.root.rglob("*"))
 
 
 class RetryRepository:

@@ -343,7 +343,7 @@ class ProcessingService:
             source_path = self.storage.source_path(
                 document_id, document_record.stored_extension
             )
-            source_page_count = self._estimate_pdf_pages(source_path) or 1
+            source_page_count = await self._estimate_pdf_pages(source_path) or 1
         await self._stage(document_id, job_id, DocumentStatus.CLASSIFYING, 8)
         source_path = self.storage.source_path(document_id, document_record.stored_extension)
         raw = await self.analyzer.classify(
@@ -704,9 +704,33 @@ class ProcessingService:
                         )
                         for item in response.translations
                     }
+                    missing_block_ids = [
+                        block.block_id for block in blocks if block.block_id not in translated_by_id
+                    ]
+                    if missing_block_ids:
+                        # The model's structured-output response omitted one or more
+                        # requested blocks - a malformed-but-200 response, not caught by
+                        # the AzureServiceError/TranslationValidationError path above.
+                        # Flag only the affected block(s) for review rather than failing
+                        # every block in the batch (the others translated successfully).
+                        await logger.awarning(
+                            "translation_batch_missing_block_ids",
+                            document_id=document.document_id,
+                            batch_index=batch_index,
+                            missing_block_ids=missing_block_ids,
+                        )
+                        batch_failed = True
                     for block in blocks:
-                        block.translated_text = translated_by_id[block.block_id]
-                        block.translation_status = TranslationStatus.TRANSLATED
+                        if block.block_id in translated_by_id:
+                            block.translated_text = translated_by_id[block.block_id]
+                            block.translation_status = TranslationStatus.TRANSLATED
+                        else:
+                            block.translation_status = TranslationStatus.FAILED
+                            block.review_required = True
+                            block.warnings.append(
+                                "Translation response did not include this block; "
+                                "needs manual review."
+                            )
                         for follower in followers.get(block.block_id, []):
                             follower.translated_text = block.translated_text
                             follower.translation_status = block.translation_status
@@ -758,11 +782,15 @@ class ProcessingService:
             review_required = review_required or target.review_required
         return review_required
 
-    def _estimate_pdf_pages(self, source_path: Path) -> int | None:
+    async def _estimate_pdf_pages(self, source_path: Path) -> int | None:
         if source_path.suffix.lower() != ".pdf":
             return None
         try:
-            return assert_pdf_safe(source_path, max_pages=self.max_document_pages)
+            # See document.py's create_upload for why this must not run inline: it
+            # would block the shared event loop that also runs every other worker.
+            return await asyncio.to_thread(
+                assert_pdf_safe, source_path, max_pages=self.max_document_pages
+            )
         except Exception:
             # Upload already validated the PDF; a later estimate miss falls back to
             # single-shot DI rather than failing the whole job.
@@ -805,7 +833,7 @@ class ProcessingService:
         source_path = self.storage.source_path(document_id, document_record.stored_extension)
         raw_path = "raw/document_intelligence.json"
         extension = str(document_record.stored_extension).lower().lstrip(".")
-        estimated_pages = self._estimate_pdf_pages(source_path)
+        estimated_pages = await self._estimate_pdf_pages(source_path)
         trusted_estimate = estimated_pages is not None and estimated_pages > 0
         if not trusted_estimate:
             # Prefer upload/DB page_count when re-parse misses (pages_ready may be None

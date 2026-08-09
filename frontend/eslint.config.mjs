@@ -14,6 +14,10 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Generated Emscripten/WASM decoder glue - not hand-written source.
     "public/wasm/**",
+    // Vendored, minified pdf.js worker build - not hand-written source.
+    "public/pdf.worker.min.mjs",
+    // Vite/vinext build output - minified bundles, not hand-written source.
+    "dist/**",
   ]),
 ]);
 

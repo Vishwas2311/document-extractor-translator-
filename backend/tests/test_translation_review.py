@@ -181,4 +181,4 @@ async def test_translation_review_route_writes_approved_export(tmp_path: Path) -
         document_id,
         "reviewed-bilingual",
     )
-    assert downloaded.path.name.endswith("reviewed-bilingual-document.json")
+    assert Path(downloaded.path).name.endswith("reviewed-bilingual-document.json")

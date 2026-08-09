@@ -8,6 +8,11 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.authorization import (
+    ROLE_REVIEWER,
+    AuthPrincipal,
+    can_list_organization,
+)
 from app.core.enums import (
     RETRIABLE_DOCUMENT_STATUSES,
     TERMINAL_DOCUMENT_STATUSES,
@@ -29,11 +34,6 @@ from app.models.document import Document
 from app.models.financial_review import FinancialReview
 from app.models.processing_job import ProcessingJob
 from app.models.translation_review import TranslationReview
-from app.core.authorization import (
-    ROLE_REVIEWER,
-    AuthPrincipal,
-    can_list_organization,
-)
 
 CLAIMABLE_JOB_STATUSES = {JobStatus.QUEUED.value, JobStatus.RUNNING.value}
 

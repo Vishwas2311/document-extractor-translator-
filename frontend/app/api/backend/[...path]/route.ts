@@ -41,26 +41,48 @@ function backendToken(): string {
 }
 
 async function proxy(request: Request, context: RouteContext): Promise<Response> {
-  try {
-    const params = await context.params;
-    const safeSegments = params.path.filter(
-      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+  const params = await context.params;
+  const safeSegments = params.path.filter(
+    (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+  );
+  if (safeSegments.length !== params.path.length) {
+    return Response.json(
+      { code: "invalid_proxy_path", message: "Invalid backend path." },
+      { status: 400 },
     );
-    if (safeSegments.length !== params.path.length) {
-      return Response.json(
-        { code: "invalid_proxy_path", message: "Invalid backend path." },
-        { status: 400 },
-      );
-    }
+  }
 
-    const target = new URL(safeSegments.map(encodeURIComponent).join("/"), backendBaseUrl());
+  // Config resolution is split from the actual request below: a missing/malformed
+  // BACKEND_API_BASE_URL or API_AUTH_TOKEN is a permanent deploy misconfiguration, not
+  // a transient outage - it will never succeed on retry, and it means every request
+  // through this proxy is currently broken, not just this one, so it's worth a loud
+  // server-side log rather than blending silently into ordinary connectivity failures.
+  let baseUrl: URL;
+  let token: string;
+  try {
+    baseUrl = backendBaseUrl();
+    token = backendToken();
+  } catch (configError) {
+    console.error("backend_proxy_misconfigured", configError);
+    return Response.json(
+      {
+        code: "backend_proxy_misconfigured",
+        message: "The document service is not available.",
+        retryable: false,
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
+    );
+  }
+
+  try {
+    const target = new URL(safeSegments.map(encodeURIComponent).join("/"), baseUrl);
     target.search = new URL(request.url).search;
 
     const headers = new Headers();
     for (const [name, value] of request.headers) {
       if (FORWARDED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
     }
-    headers.set("authorization", `Bearer ${backendToken()}`);
+    headers.set("authorization", `Bearer ${token}`);
 
     const hasBody = !new Set(["GET", "HEAD"]).has(request.method);
     const requestInit: StreamingRequestInit = {

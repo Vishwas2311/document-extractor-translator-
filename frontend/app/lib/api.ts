@@ -55,6 +55,67 @@ export class ApiValidationError extends Error {
   }
 }
 
+/**
+ * A failed request, carrying enough structure for callers to react to *what kind* of
+ * failure occurred (e.g. show a retry affordance for 5xx, or a permission notice for
+ * 403) without ever needing to inspect raw response text.
+ */
+export class ApiError extends Error {
+  readonly status?: number;
+  readonly code?: string;
+  readonly requestId?: string;
+  readonly retryable: boolean;
+
+  constructor(
+    message: string,
+    options: { status?: number; code?: string; requestId?: string; retryable?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = options.status;
+    this.code = options.code;
+    this.requestId = options.requestId;
+    this.retryable = options.retryable ?? false;
+  }
+}
+
+/**
+ * Generic, safe fallback copy per HTTP status. Used whenever the response body isn't a
+ * curated `{code, message}` payload from our own backend (e.g. a framework-level 422,
+ * a proxy/gateway error page, or a non-JSON body) — so a stray validation-error array or
+ * an upstream HTML error page never renders verbatim in the UI.
+ */
+function friendlyMessageForStatus(status: number): string {
+  switch (status) {
+    case 400:
+      return "Please complete all required fields.";
+    case 401:
+      return "Your session has expired. Please sign in again.";
+    case 403:
+      return "You don't have permission to perform this action.";
+    case 404:
+      return "We couldn't find what you're looking for.";
+    case 409:
+      return "This action conflicts with the current state of the document.";
+    case 413:
+      return "The selected file exceeds the allowed size.";
+    case 415:
+      return "The selected file is not supported.";
+    case 422:
+      return "Please complete all required fields.";
+    case 429:
+      return "You're sending requests too quickly. Please wait a moment and try again.";
+    case 502:
+    case 503:
+      return "The service is temporarily unavailable. Please try again shortly.";
+    case 504:
+      return "The request took longer than expected. Please try again.";
+    default:
+      if (status >= 500) return "Something went wrong. Please try again.";
+      return "The request could not be completed.";
+  }
+}
+
 function endpoint(path: string): string {
   if (!API_BASE) {
     throw new Error("The Python backend is not connected. Set NEXT_PUBLIC_API_BASE_URL to enable real uploads.");
@@ -122,28 +183,49 @@ async function performRequest(
   }
 
   try {
-    const response = await fetch(endpoint(path), { ...init, signal: controller.signal });
+    let response: Response;
+    try {
+      response = await fetch(endpoint(path), { ...init, signal: controller.signal });
+    } catch (fetchError: unknown) {
+      if (externalSignal?.aborted) throw fetchError;
+      if (controller.signal.aborted) {
+        throw new ApiError("The request took longer than expected. Please try again.", {
+          retryable: true,
+        });
+      }
+      // fetch() itself rejected before a response arrived - DNS failure, refused
+      // connection, offline, CORS block. There is no status/body to inspect.
+      throw new ApiError(
+        "We couldn't connect to the server. Please check your connection and try again.",
+        { retryable: true },
+      );
+    }
     if (!response.ok) {
-      let message = "Request failed with status " + response.status + ".";
+      const requestId = response.headers.get("x-request-id") ?? undefined;
+      let code: string | undefined;
+      let retryable = false;
+      let message = friendlyMessageForStatus(response.status);
       try {
         const payload: unknown = await response.json();
-        message = parseErrorDetail(payload, message);
+        if (payload && typeof payload === "object") {
+          const record = payload as Record<string, unknown>;
+          if (typeof record.code === "string") code = record.code;
+          if (typeof record.retryable === "boolean") retryable = record.retryable;
+        }
+        // Only trust the body's message when it came from our own backend's curated
+        // error envelope (identified by the presence of `code`). Uncoded bodies -
+        // framework-default validation arrays, proxy/gateway error pages - fall back
+        // to the generic per-status copy above rather than rendering raw text.
+        if (code) {
+          message = parseErrorDetail(payload, message);
+        }
       } catch {
-        // Keep the HTTP fallback when the service did not return JSON.
+        // Non-JSON body (e.g. an HTML error page from an intermediary) - keep the
+        // generic per-status fallback.
       }
-      throw new Error(message);
+      throw new ApiError(message, { status: response.status, code, requestId, retryable });
     }
     return response;
-  } catch (error) {
-    if (externalSignal?.aborted) {
-      // The caller cancelled us (unmount, superseded upload) - propagate as-is rather
-      // than reframing it as a timeout or a generic failure.
-      throw error;
-    }
-    if (controller.signal.aborted) {
-      throw new Error("The request timed out. Check your connection and try again.");
-    }
-    throw error;
   } finally {
     window.clearTimeout(timeoutId);
     externalSignal?.removeEventListener("abort", onExternalAbort);

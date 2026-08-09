@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 from app.core.exceptions import AuthorizationError
-
 
 ROLE_CASEWORKER = "caseworker"
 ROLE_REVIEWER = "reviewer"

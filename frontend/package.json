@@ -10,6 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test:unit": "vitest run",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern public/pdf.worker.min.mjs",
     "postinstall": "patch-package"
   },
@@ -22,6 +23,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.51.1",
     "@tailwindcss/postcss": "4.3.3",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
@@ -29,12 +32,14 @@
     "@vitejs/plugin-rsc": "0.5.34",
     "eslint": "9.39.5",
     "eslint-config-next": "16.3.0",
+    "jsdom": "^30.0.1",
     "patch-package": "8.0.1",
     "react-server-dom-webpack": "19.2.8",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3",
     "vinext": "1.0.0-beta.5",
     "vite": "8.2.1",
+    "vitest": "^4.1.10",
     "wrangler": "4.120.0"
   },
   "overrides": {
