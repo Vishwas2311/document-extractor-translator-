@@ -128,7 +128,9 @@ class DocumentIntelligenceAnalyzer:
                         pages=pages,
                         features=self._features() or None,
                     )
-                    result = await poller.result()
+                    result = await asyncio.wait_for(
+                        poller.result(), timeout=self.settings.azure_operation_max_seconds
+                    )
                 payload = result.as_dict()
                 result_id = _result_id_from_poller(poller)
                 if result_id:
@@ -195,7 +197,9 @@ class DocumentIntelligenceAnalyzer:
                         split=split_mode,
                         pages=pages,
                     )
-                    result = await poller.result()
+                    result = await asyncio.wait_for(
+                        poller.result(), timeout=self.settings.azure_operation_max_seconds
+                    )
                 payload = result.as_dict()
                 result_id = _result_id_from_poller(poller)
                 if result_id:
