@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `python -m pytest` adds the CWD to sys.path automatically; the bare `pytest`
+# console script (what CI runs) does not, so "import app" fails without this.
+pythonpath = ["."]
 
 [tool.ruff]
 target-version = "py312"
