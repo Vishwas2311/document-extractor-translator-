@@ -5,6 +5,14 @@ on:
     branches: [main, master]
   pull_request:
 
+# Least-privilege default for GITHUB_TOKEN: this workflow only checks out code,
+# installs dependencies, and runs tests/lint/build - it never needs to write to
+# issues, PRs, packages, or anything else. Flagged by CodeQL
+# (actions/missing-workflow-permissions) since an unset permissions block
+# inherits the repo's default token scope, which can be broader than this needs.
+permissions:
+  contents: read
+
 jobs:
   backend:
     name: Backend (pytest, ruff, mypy)
