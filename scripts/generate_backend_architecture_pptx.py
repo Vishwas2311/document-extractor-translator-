@@ -1,4 +1,4 @@
-"""Build a polished editable PowerPoint for MTS backend architecture.
+"""Build a polished editable PowerPoint for CareTranslate Studio's Azure backend architecture.
 
 Slide 1: Full professional architecture board (PNG)
 Slide 2: Icon-rich editable component map (Azure icons when available)
@@ -45,7 +45,6 @@ ICON_ALIASES = {
     "blob": ["storageaccounts", "storage-account", "blob"],
     "postgres": ["postgresql", "azuredatabasestartforpostgresql", "sql-database"],
     "redis": ["cache-redis", "redis", "azurecacheforredis"],
-    "search": ["cognitive-search", "search", "aisearch"],
     "key-vault": ["keyvaults", "key-vault", "keyvault"],
     "entra": ["entra", "activedirectory", "azureactivedirectory", "microsoft-entra-id"],
     "monitor": ["monitor", "azuremonitor"],
@@ -237,7 +236,7 @@ def build() -> Path:
         Inches(0.12),
         Inches(12),
         Inches(0.35),
-        "SA - Multilingual Translation Studio (Backend)",
+        "SA - CareTranslate Studio (Azure Backend)",
         18,
         True,
         NAVY,
@@ -273,18 +272,17 @@ def build() -> Path:
     add_label(s2, Inches(10.05), Inches(0.37), Inches(3), Inches(0.25), "Shared Platform", 10, False, BLACK)
 
     add_card(s2, Inches(0.3), Inches(0.85), Inches(2.2), Inches(1.35), GRAY, GRAY_BORDER, "API Consumers", "Partner · BFF · Mobile · External", 12, 9)
-    add_card(s2, Inches(0.45), Inches(2.45), Inches(1.9), Inches(0.7), GRAY, GRAY_BORDER, "F5", "Load balancer", 12, 9)
     add_card(
         s2,
         Inches(0.35),
-        Inches(3.4),
+        Inches(2.6),
         Inches(2.1),
         Inches(0.85),
         GRAY,
         GRAY_BORDER,
-        "App Gateway",
+        "Azure Front Door Premium (WAF)",
         "TLS · WAF · routing",
-        12,
+        11,
         9,
         icons.get("app-gateway"),
     )
@@ -298,7 +296,7 @@ def build() -> Path:
     except Exception:
         pass
     add_shadow(env)
-    add_label(s2, Inches(2.95), Inches(0.9), Inches(5), Inches(0.3), "MTS Backend Environment (CAT 3)", 13, True, NAVY)
+    add_label(s2, Inches(2.95), Inches(0.9), Inches(5), Inches(0.3), "Backend Environment (CAT 3)", 13, True, NAVY)
 
     add_card(
         s2,
@@ -323,7 +321,7 @@ def build() -> Path:
         CREAM,
         CREAM_BORDER,
         "NS2 · Orchestrator & Processing",
-        "Intake/Extract → Gateway/Profiles → Translate → Export\nData Security Gateway · Rule/Profile library · JWT between services",
+        "Intake/Extract -> Gateway/Profiles -> Translate -> Export\nImplemented: GENAI_PSEUDONYMIZED, GENAI_SYNTHETIC_POC, GENAI_RAW_EXCEPTION, MANAGED_NO_LLM, BLOCKED\nProposed: RESTRICTED_LOCAL, HUMAN_ONLY",
         12,
         9,
         icons.get("aks"),
@@ -357,7 +355,7 @@ def build() -> Path:
     add_label(s2, Inches(8.7), Inches(1.8), Inches(4), Inches(0.28), "AI HUB (CAT 1)", 13, True, NAVY)
     add_card(s2, Inches(8.75), Inches(2.15), Inches(4.05), Inches(0.65), WHITE, CREAM_BORDER, "Azure OpenAI", "GPT structured translation", 11, 8, icons.get("openai"))
     add_card(s2, Inches(8.75), Inches(2.9), Inches(4.05), Inches(0.65), WHITE, CREAM_BORDER, "Document Intelligence 4.0", "prebuilt-layout · OCR · languages", 11, 8, icons.get("doc-intel"))
-    add_card(s2, Inches(8.75), Inches(3.65), Inches(4.05), Inches(0.65), WHITE, CREAM_BORDER, "Azure AI Translator", "Non-LLM route", 11, 8, icons.get("translator"))
+    add_card(s2, Inches(8.75), Inches(3.65), Inches(4.05), Inches(0.65), WHITE, CREAM_BORDER, "Azure AI Translator (optional)", "MANAGED_NO_LLM route", 11, 8, icons.get("translator"))
 
     add_card(s2, Inches(8.55), Inches(4.75), Inches(2.1), Inches(0.7), GRAY, GRAY_BORDER, "AZ Entra ID", "App roles · SPN", 11, 8, icons.get("entra"))
     add_card(s2, Inches(10.85), Inches(4.75), Inches(2.15), Inches(0.7), GRAY, GRAY_BORDER, "Identity Governance", "Enterprise IDP", 11, 8)
@@ -370,15 +368,14 @@ def build() -> Path:
     add_label(s2, Inches(2.9), Inches(5.75), Inches(9.8), Inches(0.25), "Data Storage Layer · CMK encryption", 11, True, NAVY)
     stores = [
         (2.9, "Service Bus", "service-bus"),
-        (4.85, "Blob Storage", "blob"),
-        (6.8, "Postgres DB", "postgres"),
-        (8.75, "Redis Cache", "redis"),
-        (10.7, "AI Search", "search"),
+        (5.15, "Blob Storage", "blob"),
+        (7.4, "Azure Database\nfor PostgreSQL", "postgres"),
+        (9.9, "Cache for Redis\n(optional)", "redis"),
     ]
     for x, title, key in stores:
-        add_card(s2, Inches(x), Inches(6.05), Inches(1.8), Inches(0.7), WHITE, CREAM_BORDER, title, "", 10, 8, icons.get(key))
+        add_card(s2, Inches(x), Inches(6.05), Inches(2.1), Inches(0.7), WHITE, CREAM_BORDER, title, "", 10, 8, icons.get(key))
 
-    add_arrow(s2, Inches(2.5), Inches(3.8), Inches(2.75), Inches(3.8))
+    add_arrow(s2, Inches(2.5), Inches(3.0), Inches(2.75), Inches(3.0))
     add_arrow(s2, Inches(8.25), Inches(3.0), Inches(8.55), Inches(1.2))
 
     # Platform strip
@@ -387,7 +384,7 @@ def build() -> Path:
         (2.2, "Entra Identity", "entra"),
         (4.2, "Azure Monitor", "monitor"),
         (6.2, "Log Analytics", None),
-        (8.1, "GitLab CI/CD", None),
+        (8.1, "CI/CD (GitHub Actions)", None),
         (10.0, "Artifacts", None),
         (11.7, "Private EP", None),
     ]
@@ -405,9 +402,10 @@ def build() -> Path:
         "Slide 2 — Editable map: native PowerPoint shapes + Azure icons (drag, recolor, rename).",
         "Icons source: Microsoft Azure Architecture Center official SVG pack (when downloaded into docs/diagrams/icons).",
         "",
-        "Sell as backend-only: customers bring UI; they integrate via App Gateway / APIM.",
-        "CAT 3 = MTS namespaces (API · Orchestrator · Workers).  CAT 1 = AI Hub via APIM.",
-        "Data plane: Service Bus · Blob · Postgres · Redis · AI Search with CMK.",
+        "Sell as backend-only: customers bring UI; they integrate via Front Door / APIM.",
+        "CAT 3 = backend namespaces (API - Orchestrator - Workers).  CAT 1 = AI Hub via APIM.",
+        "Data plane: Service Bus - Blob - Azure Database for PostgreSQL - (optional) Cache for Redis, all CMK-encrypted.",
+        "Every component on this board is an Azure service; there is no non-Azure infrastructure in this architecture.",
         "",
         "Also editable in diagrams.net: Multilingual-Translation-Studio-Backend-Architecture.drawio",
         "Regenerate: backend\\.venv\\Scripts\\python.exe scripts\\generate_backend_architecture_pptx.py",

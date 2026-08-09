@@ -1,10 +1,14 @@
-# Multilingual Translation Studio — Backend Architecture
+# CareTranslate Studio — Azure Backend Architecture
 
-- **Offer:** Backend / API platform only (customers bring their own UI)  
-- **Style:** Enterprise solution architecture (Credit Memo Connect–class board)  
+- **Offer:** Backend / API platform only (customers bring their own UI)
+- **Style:** Enterprise solution architecture board
+- **Scope:** Every component on this board is a Microsoft Azure service (or a service running
+  on Azure infrastructure). No non-Azure infrastructure is part of this architecture.
 - **Visual:** [multilingual-translator-studio-backend-architecture.png](./multilingual-translator-studio-backend-architecture.png)
 
-> **SA - Multilingual Translation Studio (Backend)** — full production Azure backend. Cream = new application components · Gray = existing / shared platform.
+> **SA - CareTranslate Studio (Azure Backend)** — production target architecture, not the current
+> implementation state (see [../ARCHITECTURE.md](../ARCHITECTURE.md) for what's implemented today
+> vs. what's shown here). Cream = new application components · Gray = existing / shared platform.
 
 ---
 
@@ -12,12 +16,12 @@
 
 | Zone | Contents |
 |---|---|
-| **Ingress** | API consumers → F5 → Azure Application Gateway |
-| **MTS Backend Environment (CAT 3)** | NS1 API services · NS2 Orchestrator & processing · NS3 Workers & agents |
-| **AI Hub (CAT 1)** | Reached via APIM + App Gateway — Document Intelligence, Azure OpenAI, Translator |
-| **Data Storage Layer** | Service Bus · Blob · Postgres · Redis · AI Search · **CMK encryption** |
+| **Ingress** | API consumers → Azure Front Door Premium (WAF) |
+| **Backend Environment (CAT 3)** | NS1 API services · NS2 Orchestrator & processing · NS3 Workers & agents |
+| **AI Hub (CAT 1)** | Reached via APIM + App Gateway — Document Intelligence, Azure OpenAI, (optional) Translator |
+| **Data Storage Layer** | Service Bus · Blob · PostgreSQL · Cache for Redis (optional) · **CMK encryption** |
 | **Identity** | Entra ID · Enterprise IDP / identity governance |
-| **Platform row** | Key Vault · Entra · Monitor · Log Analytics/ELK · CI/CD · Artifact repo |
+| **Platform row** | Key Vault · Entra · Monitor · Log Analytics · CI/CD (GitHub Actions) · Artifact repo |
 
 ---
 
@@ -31,7 +35,8 @@
 ### NS2 — Orchestrator & Processing
 - Central orchestrator (intake → extract → gateway → translate → export)
 - Data Security Gateway + profile/rule library
-- Profiles: `GENAI_PSEUDONYMIZED` · `MANAGED_NO_LLM` · `RESTRICTED_LOCAL` · `HUMAN_ONLY` · `BLOCKED`
+- Profiles implemented today: `GENAI_PSEUDONYMIZED` · `GENAI_SYNTHETIC_POC` · `GENAI_RAW_EXCEPTION` · `MANAGED_NO_LLM` · `BLOCKED`
+- Profiles proposed (not yet implemented as enum members): `RESTRICTED_LOCAL` · `HUMAN_ONLY`
 - Inter-service JWT
 
 ### NS3 — Workers & Agents
@@ -60,10 +65,12 @@ Backend never exposes AI keys to consumers; all AI calls stay server-side throug
 |---|---|
 | **Service Bus** | Durable jobs, locks, DLQ, retries |
 | **Blob Storage** | Quarantine, source, pages, exports, manifest |
-| **Postgres** | Documents, jobs, leases, audit metadata |
-| **Redis** | Hot status / session-less cache / rate assists |
-| **AI Search** | Optional semantic/index retrieval |
+| **Azure Database for PostgreSQL** | Documents, jobs, leases, financial/translation reviews, audit metadata |
+| **Azure Cache for Redis** | Optional — coordinates the rate limiter's counters across multiple Container Apps replicas; a single-replica deployment doesn't need it |
 | **CMK** | Server-side encryption with customer-managed keys |
+
+This app has no semantic search/retrieval feature, so Azure AI Search is intentionally not part of
+this architecture.
 
 ---
 
@@ -73,8 +80,10 @@ Backend never exposes AI keys to consumers; all AI calls stay server-side throug
 |---|---|
 | Intake | `POST /documents` |
 | Lifecycle | status · cancel · retry (`resume` / `retranslate` / `reprocess`) |
-| Results | pages · page JSON · bilingual export · downloads |
-| Auth | Entra + APIM product subscriptions |
+| Assignment | reviewer assignment |
+| Results | pages · page JSON · financial results · bilingual export · downloads |
+| Review | financial-reviews and translation-reviews (append-only correction/approval history) |
+| Auth | Bearer token today; target is Entra ID + APIM product subscriptions |
 
 Customers integrate their own front-end, mobile app, or BFF.
 
@@ -84,14 +93,14 @@ Customers integrate their own front-end, mobile app, or BFF.
 
 ```mermaid
 flowchart TB
-  Consumers["API Consumers"] --> F5["F5"] --> AGW["App Gateway"]
+  Consumers["API Consumers"] --> AGW["Azure Front Door Premium (WAF)"]
   AGW --> NS1["NS1 API Gateway Services"]
   NS1 --> NS2["NS2 Orchestrator & Processing"]
   NS2 --> NS3["NS3 Workers & Agents"]
 
-  NS2 --> APIM["APIM"] --> AGW2["App Gateway"] --> AIHub["AI Hub CAT1<br/>DI · OpenAI · Translator"]
+  NS2 --> APIM["APIM"] --> AGW2["App Gateway"] --> AIHub["AI Hub CAT1<br/>Document Intelligence · Azure OpenAI · (optional) Translator"]
 
-  NS1 --> Data["Data Storage Layer<br/>Service Bus · Blob · Postgres · Redis · AI Search · CMK"]
+  NS1 --> Data["Data Storage Layer<br/>Service Bus · Blob · Azure Database for PostgreSQL · (optional) Cache for Redis · CMK"]
   NS2 --> Data
   NS3 --> Data
 

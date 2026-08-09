@@ -1,9 +1,9 @@
 # CareTranslate Studio Project Memory
 
 **Purpose:** concise, durable context for humans and AI tools
-**Current phase:** P0/P1 local evaluation baseline; P2 Azure production platform deferred until extraction experiment evidence
-**Last reviewed:** 2026-08-06
-**Code baseline:** local PRD-ready changes on top of prior `main`
+**Deployment target:** Microsoft Azure (Azure Document Intelligence, Azure OpenAI, Azure Database for PostgreSQL, Azure Blob Storage, Azure Key Vault, Azure Container Apps)
+**Last reviewed:** 2026-08-09
+**Code baseline:** `main`
 
 > This file records current facts and approved decisions. It is not a session transcript, task backlog, or place for secrets. Verify volatile facts against the code and deployment before acting.
 
@@ -27,25 +27,25 @@ If code differs from the documents, report the difference. Do not silently rewri
 - **Product name:** CareTranslate Studio.
 - **Repository name:** `document-extractor-translator-`.
 - **Repository URL:** `https://github.com/Vishwas2311/document-extractor-translator-.git`.
-- **Application root:** `document-intelligence-platform/` in the current repository.
+- **Application root:** repository root (`backend/`, `frontend/`, `docs/`, `scripts/`).
 - **Purpose:** extract structured content from multilingual case documents, translate supported source content to English, preserve layout/provenance, and provide reviewable results.
 - **Current intended data:** synthetic or de-identified test documents only.
-- **Production intent:** evolve the local baseline into a secure, auditable, human-reviewed Azure document-processing service.
+- **Production intent:** harden the current Azure-integrated implementation into a secure, auditable, human-reviewed Azure document-processing service.
 
 ## 3. Status vocabulary
 
-- **Implemented:** present in the baseline and verified by inspection or test.
+- **Implemented:** present in the codebase and verified by inspection or test.
 - **Partially implemented:** some code exists, but behavior or validation is incomplete.
 - **Production target:** approved direction, not proof of deployment.
 - **Open decision:** requires organizational, legal, security, product, or operational approval.
 
 Never describe a production target as implemented.
 
-## 4. Current local evaluation flow
+## 4. Current processing flow
 
 1. A user selects or drops a supported file in the web UI.
 2. The frontend sends a multipart upload to the FastAPI backend.
-3. The backend validates the request, writes the original file to local storage, and creates a SQLite document record.
+3. The backend validates the request, writes the original file to artifact storage, and creates a document record in Azure Database for PostgreSQL.
 4. In-process background work sends the file to Azure AI Document Intelligence using `prebuilt-layout`.
 5. The mapper creates an immutable provider extraction artifact containing pages, ordered blocks,
    and provider tables; a separate versioned reconciliation stage may derive an effective table
@@ -72,18 +72,23 @@ production target, not a local claim.
 
 - Python 3.12.
 - FastAPI and Pydantic.
-- SQLAlchemy with SQLite for local evaluation.
-- Local filesystem artifact storage.
-- In-process background task execution.
+- SQLAlchemy, targeting Azure Database for PostgreSQL (async engine; portable across drivers by
+  connection string).
+- Artifact storage behind a swappable protocol; the Azure Blob Storage adapter is a release gate
+  (see [ARCHITECTURE.md §4.5](./ARCHITECTURE.md) and §26).
+- In-process background task execution (`InProcessJobRunner`) — see the scaling note in
+  [ARCHITECTURE.md §26](./ARCHITECTURE.md).
 - Azure AI Document Intelligence with the `prebuilt-layout` model.
-- Azure OpenAI chat completion deployment configured for `gpt-5-mini` in the current local setup.
-- Alembic is present, but production migration discipline is not yet established.
+- Azure OpenAI chat completion deployment configured for `gpt-4.1`.
+- Alembic migrations are the schema-change mechanism; 8 revisions exist. A startup-time
+  `create_all()`/ad hoc column-patch path also exists behind `USE_CREATE_ALL` and should not be
+  used for production schema changes — see [RULES.md §11](./RULES.md).
 
 ### Frontend
 
-- React `19.2.6`.
+- React `19.2.8`.
 - Next-compatible application structure using Next `16.3.0` and Vinext `1.0.0-beta.5`.
-- Vite `8.0.13` toolchain.
+- Vite `8.2.1` toolchain.
 - PDF.js-based PDF preview.
 - Browser polling for processing state.
 
@@ -92,13 +97,16 @@ These versions are a baseline snapshot, not a permanent constraint. Recheck lock
 ## 6. Stable processing constants
 
 - **Artifact schema version:** `1.0`.
-- **Processing version:** `prd-local-4` for newly created documents; prior stored attempts retain their original version.
+- **Processing version:** `prd-local-4` for newly created documents; prior stored attempts retain their original version. (The version-string prefix predates the current Azure-only deployment framing; it is a stable identifier, not a description of where the app runs.)
 - **Translation prompt version:** `translation-v3-multilingual-format-aware`.
 - **OCR confidence review threshold:** `0.85`.
 - **Translation batch limit:** 40 blocks.
 - **Translation text limit per batch:** 16,000 characters.
-- **Local evaluation file-size ceiling:** 150 MB.
-- **Production page-count target:** 300 pages.
+- **Translation concurrency:** up to 12 concurrent Azure OpenAI batch calls per document.
+- **Document Intelligence page-range size:** 50 pages per range above the threshold, up to 4
+  ranges analyzed concurrently per document (§8.1 of ARCHITECTURE.md).
+- **Upload file-size ceiling:** 150 MB.
+- **Document page-count ceiling:** 300 pages.
 
 Any change that affects persisted structure, interpretation, or translation output must follow the versioning rules in `docs/RULES.md`.
 
@@ -112,7 +120,7 @@ Any change that affects persisted structure, interpretation, or translation outp
 - TIFF/TIF.
 - BMP.
 
-The backend accepts these formats in the current local baseline. DOCX and XLSX are production export targets, not accepted input formats. The preview experience is not yet equally complete for all accepted formats; PDF preview is the clearest implemented path.
+The backend accepts these formats today. DOCX and XLSX are production export targets, not accepted input formats. The preview experience is not yet equally complete for all accepted formats; PDF preview is the clearest implemented path.
 
 ### Languages
 
@@ -131,7 +139,7 @@ The backend accepts these formats in the current local baseline. DOCX and XLSX a
 
 ## 8. Persisted artifacts and state
 
-The local baseline uses local directories for original uploads and derived JSON artifacts. Server-generated document identifiers must control paths; user file names must not become trusted paths.
+Artifact storage (target: Azure Blob Storage) holds original uploads and derived JSON artifacts under a path scheme rooted at server-generated document identifiers; user file names must not become trusted paths.
 
 Conceptually, each document retains:
 
@@ -177,7 +185,7 @@ The exact set is controlled by the backend and frontend example environment file
 - Azure AI Document Intelligence endpoint and credential.
 - Azure OpenAI endpoint, credential, API version, and deployment name.
 - Database URL.
-- Local storage root.
+- Artifact storage root (Blob container/prefix in production).
 - CORS origin configuration.
 - Backend API base URL exposed to the frontend only when it is safe to be public.
 - Logging level and development mode.
@@ -186,9 +194,9 @@ Store names and placeholders in documentation, never real values. Never open or 
 
 ## 11. Approved product decisions
 
-- **Documentation scope:** Describe both the implemented local baseline and production roadmap.
+- **Documentation scope:** Describe both the current implementation and production roadmap.
 
-- **Local evaluation data:** Synthetic or de-identified approved test data only.
+- **Current test data:** Synthetic or de-identified approved test data only.
 
 - **Production data:** Real records only after privacy, security, legal, and operational gates
   are approved.
@@ -298,10 +306,15 @@ Jurisdiction, exact compliance profile, identity tenant design, final SLOs, and 
 
 The readable diagram and complete service-control matrix are in `docs/DATA-SECURITY.md`.
 
-## 12. Known limitations at the baseline
+## 12. Known limitations
 
-1. There is no production authentication or role-based authorization.
-2. The local baseline uses SQLite and local disk, which are not appropriate for horizontally scaled production workloads.
+1. Authentication is a bearer-token registry, not Entra ID; a real (if non-federated)
+   organization/ownership/role authorization layer is implemented on top of it (see
+   [ARCHITECTURE.md §2.1](./ARCHITECTURE.md)).
+2. The Azure Blob Storage artifact-storage adapter is not yet built (protocol exists, filesystem
+   implementation is the only concrete adapter today); Azure Database for PostgreSQL is supported
+   by the existing SQLAlchemy async engine but not yet operationally validated in a deployed
+   environment.
 3. Processing runs in the API process rather than through a durable queue.
 4. Resume, retranslate, and reprocess are implemented locally, but durable distributed delivery,
    dead-lettering, and multi-worker recovery remain production targets.
@@ -312,7 +325,9 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
 7. Preview capability does not fully match all accepted file types.
 8. Some UI security or service-status language is static and must not be treated as deployment evidence.
 9. Production observability, cost controls, alerts, and operational runbooks are missing.
-10. CI release gates, SBOM generation, container scanning, and deployment evidence are not established.
+10. CI (lint, type check, test, build on every push/PR via GitHub Actions, with branch protection
+    requiring both jobs to pass before merge to `main`) is established. SBOM generation, container
+    scanning, and a deployed-Azure-environment gate are not yet established.
 11. Frontend and Python production dependencies have reviewed lock artifacts, but CI SBOM/container
     vulnerability gates are not established. `npm audit` reports 2 high-severity findings
     (GHSA-w3rx-r6r6-pgpr, GHSA-5p2g-fcmc-qvqq) in `image-size`, a transitive dependency of `vinext`.
@@ -328,11 +343,14 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
     `vinext` to `0.0.45`, well below the version this project requires. Re-check `npm audit` on the
     next dependency update pass; once a real upstream fix ships, drop the patch and bump the
     version instead.
-12. Tenant isolation, object-level authorization, and production audit trails are not implemented.
+12. Object-level authorization (organization boundary, ownership, assignment) and an append-only
+    audit trail are implemented (`core/authorization.py`, `audit_events` table); what's missing is
+    Entra ID federation and a WORM-grade guarantee on the audit store beyond normal database row
+    protection.
 13. The backend enforces a processing profile and implements optional financial classification,
     but the production policy service, deployment allowlist, and operational kill switch are not
     established.
-14. The pseudonymized route implements a lightweight local tokenization gateway; approved
+14. The pseudonymized route implements a lightweight regex-based tokenization gateway; approved
     multilingual PII detection and benchmark evidence remain production requirements.
 15. Document Intelligence deletion is attempted immediately when a result ID is available, but
     durable deletion receipts, retry orchestration, deadline alerts, and deployment evidence are
@@ -351,7 +369,7 @@ The following results describe the inspected revision only:
   `image-size` (transitive via `vinext`), no upstream patch available; confirmed unreachable in
   this app's build — see section 12, item 11.
 - Alembic upgraded from base through `0007_financial_structure_reviews` and downgraded to base successfully on a disposable SQLite database.
-- Repository CI and P2 deployment evidence are not established.
+- Repository CI is established (GitHub Actions, §12 item 10); Azure deployment evidence is not.
 
 Re-run all relevant checks after copying these documents or changing code. Replace this section when a newer verified baseline exists; do not simply append an ever-growing test diary.
 
@@ -433,7 +451,7 @@ These rows describe a production target, not the current deployment state.
 
 ## 15. Next engineering priorities
 
-1. Run the controlled synthetic/de-identified 100–200-page extraction experiment and approve recall/cost thresholds; keep the local baseline synthetic-only meanwhile.
+1. Run the controlled synthetic/de-identified extraction experiment (up to the 300-page ceiling) and approve recall/cost thresholds; keep the current implementation synthetic-only meanwhile.
 2. Close current quality-gate findings and establish CI.
 3. Add optional active provider probes or recent-call status without confusing configuration with
    provider health; the UI now labels configuration presence accurately.

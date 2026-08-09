@@ -1,9 +1,8 @@
 # CareTranslate Studio Engineering Rules
 
 **Document type:** Normative engineering and operating rules
-**Applies to:** Local evaluation maintenance and production evolution
-**Last reviewed:** 2026-08-06
-**Baseline:** current uncommitted evaluation tree; verify revision before release
+**Applies to:** Current implementation maintenance and production evolution on Microsoft Azure
+**Last reviewed:** 2026-08-09
 
 ## 1. Purpose and authority
 
@@ -28,8 +27,8 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
 
 ## 2. Data classification and permitted use
 
-1. The local evaluation baseline MUST use synthetic, de-identified, or explicitly approved test documents only.
-2. Real youth, child-welfare, education, health, justice, case-management, or other sensitive personal records MUST NOT be uploaded to the local baseline.
+1. The current implementation MUST use synthetic, de-identified, or explicitly approved test documents only.
+2. Real youth, child-welfare, education, health, justice, case-management, or other sensitive personal records MUST NOT be uploaded until the production release gates in `docs/PRD.md` are met.
 3. Sample documents committed to source control MUST be synthetic and MUST contain no secrets, personal data, or recoverable identifiers.
 4. Production processing of real records is prohibited until every production release gate in `docs/PRD.md` has an accountable owner and evidence of approval.
 5. Document text, page images, translations, comments, and extracted values MUST be treated as confidential content.
@@ -96,7 +95,7 @@ The documentation labels **Implemented**, **Partially implemented**, **Productio
    - **Mandatory routing rule:** MUST remain quarantined or enter an authorized human workflow
    - **Status:** Required fallback
 
-The proposed components below are production requirements, not claims about the current local baseline:
+The proposed components below are production requirements, not claims about the current implementation:
 
 1. **Service boundary:** Entra ID + Front Door Premium WAF + API Management
    - **Data handled:** Identity/request metadata; upload traffic on approved route
@@ -173,7 +172,7 @@ The proposed components below are production requirements, not claims about the 
 
 ## 4. Authentication and authorization
 
-1. The local baseline MUST be labeled as development-token protected and not production-authorized wherever that limitation affects use.
+1. The current bearer-token registry MUST be labeled as not Entra-federated, and the gap between it and production identity federation MUST be documented wherever that limitation affects use. This is separate from authorization (rules 3-6), which is implemented on top of the current token today.
 2. Production MUST authenticate every interactive user and service identity.
 3. Production authorization MUST be enforced by the backend; hiding frontend controls is not authorization.
 4. Access MUST follow least privilege and the approved roles: Caseworker, Reviewer, Administrator, Auditor, and System Operator.
@@ -261,7 +260,12 @@ The following invariants are mandatory:
 ## 11. Database and migration rules
 
 1. Production schema changes MUST use reviewed Alembic migrations.
-2. Runtime `create_all` behavior MUST NOT be the production migration strategy.
+2. Runtime `create_all` behavior MUST NOT be the production migration strategy. **Current gap:**
+   `dependencies/services.py` still calls `create_schema()` (`create_all`) plus a raw ad hoc
+   `ensure_prd_columns()` `ALTER TABLE` patch at startup when `USE_CREATE_ALL` is enabled (the
+   default). 8 real Alembic revisions already exist and cover the same schema — closing this gap
+   before production means setting `USE_CREATE_ALL=false` and retiring the ad hoc patch path, not
+   writing new migration tooling. Tracked in [ARCHITECTURE.md §26](./ARCHITECTURE.md).
 3. Migrations MUST be forward-safe, tested on representative data, and paired with a rollback or recovery plan.
 4. Destructive migrations MUST include a verified backup and explicit approval.
 5. Database constraints SHOULD enforce identifiers, relationships, uniqueness, and valid state where practical.

@@ -1,16 +1,14 @@
 # Financial Extraction Engine
 
 - **Document type:** Product and implementation specification
-- **Status:** P0/P1 implemented local evaluation baseline; P2 Azure platform deferred
-- **Processing contract:** `prd-local-4`
 - **Financial schemas:** `financial-classification-1.1`, `table-reconciliation-1.0`, `financial-result-1.4`, `financial-validation-1.3`
-- **Last reviewed:** 2026-08-06
+- **Last reviewed:** 2026-08-09
 
 ## 1. Objective
 
-Extract financial data from 100–200-page documents without flattening it or presenting unrelated document content as financial. Financial tables remain tables; headings, narrative disclosures, key-values, and list items retain their semantic format and source order. The engine preserves original page numbers, geometry, raw OCR text, translations, table coordinates, normalized values, classification evidence, validation findings, and reviewer history.
+Extract financial data from documents up to the configured page ceiling (300 pages by default) without flattening it or presenting unrelated document content as financial. Financial tables remain tables; headings, narrative disclosures, key-values, and list items retain their semantic format and source order. The engine preserves original page numbers, geometry, raw OCR text, translations, table coordinates, normalized values, classification evidence, validation findings, and reviewer history.
 
-The local evaluation baseline is not authorization for real sensitive records. It uses local storage, SQLite, and an in-process runner. The Azure P2 platform remains a production target until deployed and evidenced.
+The current implementation is not authorization for real sensitive records — see [DATA-SECURITY.md](./DATA-SECURITY.md) for the approval gates. It runs against Azure Document Intelligence and Azure OpenAI, with Azure Database for PostgreSQL and Azure Blob Storage as the target metadata/artifact stores (§12 lists what's not yet deployed).
 
 ## 2. Processing modes
 
@@ -230,6 +228,12 @@ Measure separately by document family:
 
 Selective mode cannot become the default until the accountable owner approves thresholds and demonstrates that no supported document family falls below the recall gate.
 
-## 12. Deferred P2 platform
+## 12. Deferred platform work
 
-The following are not implemented by this increment: Azure Database for PostgreSQL, Blob Storage, Service Bus workers, Entra tenant/object authorization, Defender for Storage malware scanning, managed identities, private endpoints, controlled egress, provider-result deletion evidence, and production corpus release automation. They remain the next platform phase after the extraction experiment.
+The following are not implemented by this increment: an Azure Blob Storage artifact-storage
+adapter (SQLAlchemy's async engine is already portable to Azure Database for PostgreSQL via
+connection string, but this hasn't been operationally validated against a deployed Postgres
+instance), Service Bus workers, Entra ID federation on top of the existing organization/role
+authorization layer, Defender for Storage malware scanning, managed identities, private endpoints,
+controlled egress, and provider-result deletion evidence. They remain the next platform phase after
+the extraction experiment.
