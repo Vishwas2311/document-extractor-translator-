@@ -2549,6 +2549,13 @@ export function DocumentStudio() {
                       height: "auto",
                     }}
                   >
+                    {/* next/image can't help here: `realSource` is a local blob: URL from
+                        an authenticated fetch (the API requires a Bearer token), not a
+                        fetchable remote URL - and vinext's own compat table documents that
+                        local images fall back to plain <img> + srcSet with no build-time
+                        optimization anyway, so switching component would change nothing
+                        except adding risk. */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       alt=""
                       aria-hidden="true"
@@ -2691,6 +2698,12 @@ export function DocumentStudio() {
                   </div>
                 ) : canPreviewImage && realSource ? (
                   <div className="real-page-frame">
+                    {/* Same rationale as the thumbnail <img> above: realSource is a local
+                        blob: URL, and this component also relies on discovering the
+                        image's natural size reactively via onLoad (unknown ahead of
+                        render), which next/image's required width/height precondition
+                        doesn't fit without restructuring for zero real benefit. */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       alt={"Source preview for " + document.original_filename}
                       className="source-image-preview"
