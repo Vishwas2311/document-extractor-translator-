@@ -2,9 +2,7 @@
 
 - **Product:** CareTranslate Studio
 
-- **Phase:** P0/P1 local evaluation baseline; P2 Azure platform deferred until experiment evidence
-
-- **Implementation baseline:** Current uncommitted evaluation tree; verify revision before release
+- **Deployment target:** Microsoft Azure (Azure Document Intelligence, Azure OpenAI, Azure Database for PostgreSQL, Azure Blob Storage, Azure Key Vault, Azure Container Apps)
 
 - **Last reviewed:** 2026-08-06
 
@@ -14,7 +12,7 @@
 
 ## 1. Purpose
 
-This PRD defines the product problem, users, implemented local evaluation behavior, production requirements, success measures, and release boundaries for CareTranslate Studio. It is the source of truth for **what** the product must do and **why**.
+This PRD defines the product problem, users, current implementation behavior, production requirements, success measures, and release boundaries for CareTranslate Studio. It is the source of truth for **what** the product must do and **why**.
 
 - Implementation design belongs in [ARCHITECTURE.md](./ARCHITECTURE.md).
 - The manager-facing processing options, security controls, and approval gates belong in [DATA-SECURITY.md](./DATA-SECURITY.md).
@@ -33,7 +31,7 @@ Status labels must be updated when behavior changes. Proposed features must neve
 
 ## 2. Product summary
 
-CareTranslate Studio is a human-in-the-loop document intelligence workspace for youth-care teams. It accepts multilingual documents, extracts text and layout, translates eligible content into English, preserves page and source-format context, and presents synchronized financial review and export views. The current synthetic-only local baseline uses Azure Document Intelligence and Azure OpenAI. Azure OpenAI remains a planned production component for translation and future approved features, but the backend must select an approved data-security profile first. The normal Azure OpenAI-enabled route sends only the minimum pseudonymized content; raw confidential or restricted content is prohibited by default.
+CareTranslate Studio is a human-in-the-loop document intelligence workspace for youth-care teams. It accepts multilingual documents, extracts text and layout, translates eligible content into English, preserves page and source-format context, and presents synchronized financial review and export views. The current synthetic-only implementation uses Azure Document Intelligence and Azure OpenAI. Azure OpenAI remains a planned production component for translation and future approved features, but the backend must select an approved data-security profile first. The normal Azure OpenAI-enabled route sends only the minimum pseudonymized content; raw confidential or restricted content is prohibited by default.
 
 The product accelerates initial understanding and structured review. It does not make clinical, safeguarding, eligibility, legal, or care decisions. Machine extraction and translation remain subject to human verification.
 
@@ -65,9 +63,12 @@ The product must provide assistance without presenting uncertain output as verif
 
 ## 5. Users and roles
 
-### Current local evaluation baseline
+### Current implementation
 
-The local baseline has backend bearer-token authentication but no Entra identity, organization model, tenant isolation, assignment, or document-ownership authorization. Its token gate is a development containment control, not production RBAC.
+The current implementation has backend bearer-token authentication plus an organization/ownership/
+assignment/role authorization layer (`caseworker`, `reviewer`, `org_admin`, `auditor`, `operator`)
+enforced on every document route. What's missing is Microsoft Entra ID federation — the token
+registry itself is not yet backed by an enterprise identity provider.
 
 ### Production roles
 
@@ -96,7 +97,7 @@ Backend authorization is mandatory. Hiding frontend controls is not authorizatio
 
 ## 6. Goals
 
-### Local evaluation goals
+### Current-stage goals
 
 - Demonstrate page, paragraph, table, language, geometry, and confidence extraction.
 - Demonstrate language-agnostic routing of valid detected non-English language tags to English translation, with unknown language routed to review.
@@ -160,9 +161,9 @@ English is the only approved target language. Adding another target language req
 4. Source-region hover and selection synchronize with result cards.
 5. Synthetic JSON can be downloaded.
 
-### Process a document in local evaluation
+### Process a document
 
-1. The local user uploads or drops one accepted file.
+1. The user uploads or drops one accepted file.
 2. The backend validates extension, size, signature, and extension/signature agreement.
 3. The API returns `202 Accepted` with a document ID.
 4. The browser polls processing status.
@@ -202,13 +203,13 @@ English is the only approved target language. Adding another target language req
    - **Status:** Implemented
 
 3. **ID:** FR-003
-   - **Requirement:** Default the application upload limit to 50 MB.
+   - **Requirement:** Default the application upload limit to 150 MB.
    - **Status:** Implemented
 
 4. **ID:** FR-004
-   - **Requirement:** Default production page limit to 200, configurable downward per
+   - **Requirement:** Default the document page limit to 300, configurable downward per
      organization.
-   - **Status:** Production target
+   - **Status:** Implemented (organization-level override remains a production target)
 
 5. **ID:** FR-005
    - **Requirement:** Malware-scan production uploads before extraction.
@@ -302,7 +303,7 @@ English is the only approved target language. Adding another target language req
 
 9. **ID:** FR-028
    - **Requirement:** Respect translation batch limits.
-   - **Status:** Implemented — 25 blocks/12,000 characters by default
+   - **Status:** Implemented — 40 blocks/16,000 characters by default, up to 12 concurrent batch calls per document
 
 10. **ID:** FR-029
    - **Requirement:** Record schema, processing, prompt, model deployment, and attempt versions.
@@ -332,7 +333,7 @@ English is the only approved target language. Adding another target language req
 
 6. **ID:** FR-035
    - **Requirement:** Record reviewer, timestamp, comment, correction, and decision.
-   - **Status:** Partially implemented — financial reviewer, timestamp, note, correction, decision, processing version and result hash are persisted
+   - **Status:** Implemented for both financial and translation review — reviewer, timestamp, note, correction, decision, processing version, and result hash are persisted (`financial_reviews`/`translation_reviews` tables)
 
 7. **ID:** FR-036
    - **Requirement:** Never present machine output as certified without a separate approved
@@ -585,7 +586,7 @@ English is the only approved target language. Adding another target language req
    - **Status:** Production target
 
 10. **Control ID:** NFR-SEC-10
-   - **Control area:** Local evaluation data
+   - **Control area:** Current test data
    - **Product requirement:** Do not use real youth records until formal approval
    - **LLM exposure effect:** Current raw Azure OpenAI route remains synthetic/de-identified
      only
@@ -679,9 +680,9 @@ The proposed production protection chain is summarized below. The complete confi
 
 These targets are provisional until representative benchmarking:
 
-- **Maximum upload size:** 50 MB by default
+- **Maximum upload size:** 150 MB by default
 
-- **Maximum page count:** 200 by default
+- **Maximum page count:** 300 by default
 
 - **Upload acceptance after transfer:** Under 2 seconds at P95
 
@@ -723,11 +724,11 @@ These targets are provisional until representative benchmarking:
 
 ## 12. Retention decisions
 
-### Local evaluation baseline
+### Current stage
 
 - Synthetic or formally anonymized documents only.
 - Delete test documents after the demonstration or test cycle.
-- The local baseline is not an approved system of record.
+- The current implementation is not an approved system of record.
 
 ### Production default
 
@@ -833,17 +834,17 @@ No real youth record may enter the shared test suite.
 
 ## 16. Release gates
 
-### Local evaluation baseline
+### Current stage
 
 - Synthetic demo works without credentials.
-- Configured backend/frontend quality checks pass.
+- Configured backend/frontend quality checks pass (CI enforced on every push/PR).
 - No secrets or runtime documents are tracked.
 - Current limitations are documented.
 - Real youth records remain prohibited.
 
 ### Controlled pilot
 
-- Authentication and backend authorization.
+- Entra ID federation on top of the existing bearer-token/authorization layer.
 - Approved test/anonymized data unless formally approved otherwise.
 - Malware scanning, rate limits, managed secrets, monitoring, and audit.
 - Durable production-like storage and queue.
@@ -867,9 +868,9 @@ No real youth record may enter the shared test suite.
 
 ## 17. Roadmap
 
-### Phase 1 — Stabilize the local evaluation baseline
+### Phase 1 — Stabilize the current implementation
 
-- Make all quality checks green and add CI.
+- Make all quality checks green and add CI. (Done — see [ARCHITECTURE.md §19](./ARCHITECTURE.md).)
 - Upgrade affected dependencies.
 - Implement image preview or temporarily narrow the UI promise.
 - Replace static connected/secure indicators with actual state.
@@ -908,9 +909,9 @@ No real youth record may enter the shared test suite.
 
 ## 18. Approved decisions
 
-1. Documentation covers the implemented local baseline and production roadmap.
+1. Documentation covers the current implementation and production roadmap.
 2. Production roles are caseworker, translation reviewer, organization administrator, compliance auditor, and platform operator.
-3. Real youth records are prohibited in the local baseline.
+3. Real youth records are prohibited until the release gates in §16 are met.
 4. Jurisdiction is deployment-specific and a production release blocker.
 5. English is the only target language; production-enabled source languages are controlled by approved language/document-family benchmark gates, not by a hard-coded application allowlist.
 6. Every advertised format must ultimately have reliable preview.
@@ -918,7 +919,7 @@ No real youth record may enter the shared test suite.
 8. Retry modes are Resume, Retranslate, and Reprocess completely.
 9. Production includes correction and approval with immutable history.
 10. Target backend hosting is Azure Container Apps with separate API and worker.
-11. Initial limits are 50 MB and 200 pages, subject to benchmarking.
+11. Initial limits are 150 MB and 300 pages, subject to benchmarking.
 12. Production exports include JSON, bilingual PDF, DOCX, table CSV/XLSX, and an audit manifest.
 
 ## 19. Organization-level decisions still required
