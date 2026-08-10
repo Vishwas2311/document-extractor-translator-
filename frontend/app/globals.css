@@ -1667,7 +1667,7 @@ button:focus-visible {
   color: var(--brand-dark);
   background: var(--surface-teal);
   border-top: 1px solid #cbd5e1;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -1675,7 +1675,7 @@ button:focus-visible {
   color: var(--brand);
   background: transparent;
   border: 0;
-  font-size: 10px;
+  font-size: 12px;
   cursor: pointer;
   text-decoration: underline;
 }
@@ -2629,7 +2629,7 @@ button:focus-visible {
 .tab-list button {
   border: 1px solid transparent;
   border-radius: 8px;
-  font-size: 8px;
+  font-size: 10px;
   transition: color 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 
@@ -3277,7 +3277,7 @@ button:focus-visible {
 .page-structure {
   overflow: hidden;
   color: #475569;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3304,7 +3304,7 @@ button:focus-visible {
 .language-summary-label {
   margin-right: auto;
   color: #475569;
-  font-size: 7px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3320,7 +3320,7 @@ button:focus-visible {
   background: #eef2f6;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  font-size: 8px !important;
+  font-size: 10px !important;
   white-space: nowrap;
 }
 
@@ -3793,7 +3793,7 @@ button:focus-visible {
 
 .inspector-dock-meta .eyebrow {
   color: #475569;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3801,14 +3801,14 @@ button:focus-visible {
 
 .inspector-dock-meta strong {
   color: #0f172a;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
   letter-spacing: -0.01em;
 }
 
 .inspector-dock-meta strong span {
   color: #64748b;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -3984,16 +3984,16 @@ button:focus-visible {
 }
 
 .financial-summary-card .eyebrow {
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .financial-summary-card strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .financial-summary-meta {
   color: var(--muted, #657084);
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .financial-language-switcher {
@@ -4014,7 +4014,7 @@ button:focus-visible {
   color: var(--muted, #657084);
   cursor: pointer;
   font: inherit;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 750;
 }
 
@@ -4054,7 +4054,7 @@ button:focus-visible {
   gap: 3px;
   align-items: center;
   color: var(--muted, #657084);
-  font-size: 6px;
+  font-size: 9px;
   font-weight: 750;
   text-transform: uppercase;
 }
@@ -4145,7 +4145,7 @@ button:focus-visible {
   padding-top: 5px;
   color: var(--muted, #657084);
   border-top: 1px solid #eef2f6;
-  font-size: 8px !important;
+  font-size: 10px !important;
 }
 
 .financial-content-warnings {
@@ -4154,7 +4154,7 @@ button:focus-visible {
   border-radius: 6px;
   background: #fff7e8;
   color: #795700;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.45;
 }
 
@@ -4217,11 +4217,11 @@ button:focus-visible {
 .table-reconciliation-review > div {
   display: grid;
   gap: 2px;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .table-reconciliation-review > div > strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .table-reconciliation-review > div > span {
@@ -4235,7 +4235,7 @@ button:focus-visible {
   border-radius: 6px;
   background: #fff;
   color: inherit;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
 }
 
@@ -4254,7 +4254,7 @@ button:focus-visible {
 .table-reconciliation-review > .structure-decision-help {
   grid-column: 1 / -1;
   color: var(--muted, #657084);
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .validation-issue {
@@ -4271,7 +4271,7 @@ button:focus-visible {
   border-radius: 4px;
   background: #fff1cc;
   color: #795700;
-  font-size: 7px;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -4283,14 +4283,14 @@ button:focus-visible {
 
 .validation-issue p {
   margin: 0;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
 .financial-validation-list strong,
 .financial-correction-list strong,
 .financial-review-panel strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .financial-page-excluded {
@@ -4312,13 +4312,13 @@ button:focus-visible {
 .financial-review-panel > p {
   margin: 0;
   color: var(--muted, #657084);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .financial-correction-list label {
   display: grid;
   gap: 4px;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .financial-correction-list input,
@@ -4331,7 +4331,7 @@ button:focus-visible {
   color: inherit;
   padding: 6px 7px;
   font: inherit;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 @media (max-width: 720px) {
@@ -4357,7 +4357,7 @@ button:focus-visible {
   border-radius: 6px;
   background: #fff;
   color: inherit;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
 }
 
