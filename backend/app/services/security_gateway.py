@@ -21,6 +21,10 @@ PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
 URL_RE = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.IGNORECASE)
 # Long digit runs and common ID-like tokens (case numbers, MRNs, etc.).
 ID_RE = re.compile(r"\b(?:ID|MRN|SSN|NINO|CASE)[-:#\s]?\d{4,}\b|\b\d{6,}\b", re.IGNORECASE)
+# Matches a pseudonym token as generated in `_pseudonymize` below (e.g. "⟦ID_a3f9c2d1e4b5⟧").
+# Single source of truth for the token shape, reused by validation.py's round-trip
+# integrity check so the two can never silently drift apart.
+PSEUDONYM_TOKEN_RE = re.compile(r"⟦[A-Z]+_[0-9a-f]{12}⟧")
 
 
 @dataclass

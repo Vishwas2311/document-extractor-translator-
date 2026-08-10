@@ -83,6 +83,7 @@ class NormalizedFinancialValue(BaseModel):
         "ambiguous_monetary_separator",
         "ambiguous_currency",
         "malformed_monetary_value",
+        "cjk_magnitude_suffix",
     ] | None = None
     normalization_status: Literal[
         "parsed", "ambiguous", "unparsed", "empty", "not_applicable"
