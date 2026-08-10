@@ -1414,7 +1414,7 @@ button:focus-visible {
 }
 
 .translation-status-message strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .result-count {
@@ -1440,7 +1440,7 @@ button:focus-visible {
   background: #eaf1f8;
   border: 1px solid #d5e9e4;
   border-radius: 8px;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -1489,7 +1489,7 @@ button:focus-visible {
   color: #fff;
   background: var(--brand);
   border-radius: 5px;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 850;
 }
 
@@ -1499,7 +1499,7 @@ button:focus-visible {
 .review-chip {
   padding: 3px 6px;
   border-radius: 99px;
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -1544,7 +1544,7 @@ button:focus-visible {
   overflow: hidden;
   color: #475569;
   border-top: 1px solid #eef2f6;
-  font-size: 8px;
+  font-size: 10px;
   line-height: 1.45;
   text-overflow: ellipsis;
 }
@@ -1560,7 +1560,7 @@ button:focus-visible {
 
 .translation-correction-field > span {
   color: var(--muted, #657084);
-  font-size: 7px;
+  font-size: 10px;
   font-weight: 750;
   text-transform: uppercase;
 }
@@ -1573,7 +1573,7 @@ button:focus-visible {
   color: inherit;
   padding: 5px 6px;
   font: inherit;
-  font-size: 9px;
+  font-size: 11px;
   resize: vertical;
 }
 
@@ -1694,7 +1694,7 @@ button:focus-visible {
   color: #5b7690;
   background: #081420;
   border-bottom: 1px solid #1c3040;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .json-panel pre {
@@ -1702,7 +1702,7 @@ button:focus-visible {
   padding: 14px;
   overflow: auto;
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
   tab-size: 2;
   white-space: pre-wrap;
@@ -2714,7 +2714,7 @@ button:focus-visible {
 .translation-text,
 .extracted-text {
   color: #0f172a;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -3690,7 +3690,7 @@ button:focus-visible {
 }
 
 .page-loading-message strong {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 /* Full-height page intelligence column: results from the top, controls mid-dock */
@@ -4093,12 +4093,12 @@ button:focus-visible {
 }
 
 .financial-content-item h3 {
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
 .financial-content-item p {
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.5;
 }
 
@@ -4116,7 +4116,7 @@ button:focus-visible {
   margin: 0;
   padding: 6px;
   overflow-wrap: anywhere;
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
@@ -4374,5 +4374,5 @@ button:focus-visible {
   flex-wrap: wrap;
   gap: 5px;
   color: var(--muted, #657084);
-  font-size: 8px;
+  font-size: 10px;
 }
