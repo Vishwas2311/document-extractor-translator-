@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from io import BytesIO
 
@@ -25,6 +26,7 @@ from app.services.financial import (
     CURRENCY_NAME_CONTEXT,
     CURRENCY_SYMBOLS,
     DATE_CONTEXT_RE,
+    FINANCIAL_TERMS_ARABIC_RE,
     FINANCIAL_TERMS_CJK_RE,
     IDENTIFIER_CONTEXT_RE,
     MONETARY_CONTEXT_RE,
@@ -785,7 +787,7 @@ def test_layout_measurement_table_is_uncertain_not_definitively_financial() -> N
     assert page.selected
     assert page.review_required
     assert page.reasons == ["layout_measurement_table_requires_review"]
-    assert classification.classifier_version == "2.3"
+    assert classification.classifier_version == "2.4"
 
 
 def test_from_layout_selects_chinese_only_financial_table() -> None:
@@ -888,6 +890,129 @@ def test_has_financial_signal_detects_chinese_narrative() -> None:
 
     assert len(result.content_items) == 1
     assert result.validation.issues == []
+
+
+def test_arabic_attached_prefix_matches_via_substring_not_boundary() -> None:
+    # Arabic has spaces BETWEEN separate words, but single-letter prefixes (the
+    # definite article "ال", conjunctions/prepositions) attach directly to the
+    # following word with no space - "الأصول" ("the assets") has no \w/non-\w
+    # transition before "أصول", so \b-wrapped matching fails on real Arabic text even
+    # though Arabic isn't spaceless like CJK. Confirmed empirically before this fix.
+    text = "تشمل الأصول والخصوم وحقوق الملكية"
+    assert not re.search(r"\bأصول\b", text)
+    assert FINANCIAL_TERMS_ARABIC_RE.search(text)
+
+
+def test_from_layout_selects_arabic_only_financial_table() -> None:
+    document = CanonicalDocument(
+        document_id="doc-arabic-table",
+        filename="annual-report.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text="الميزانية العمومية بالآلاف من الريال السعودي",
+            )
+        ],
+        tables=[
+            TableResult(
+                table_id="balance-sheet",
+                row_count=1,
+                column_count=1,
+                cells=[
+                    TableCell(
+                        cell_id="total-assets",
+                        row_index=0,
+                        column_index=0,
+                        content="2,543,348",
+                        bounding_regions=[_region(1)],
+                    )
+                ],
+            )
+        ],
+    )
+
+    classification = _selector().from_layout(document=document, source_page_count=1)
+
+    page = classification.pages[0]
+    assert page.disposition == FinancialPageDisposition.FINANCIAL
+    assert page.selected
+    assert not page.review_required
+    assert page.reasons == ["layout_table_and_financial_terms"]
+
+
+def test_has_financial_signal_detects_arabic_narrative() -> None:
+    classification = FinancialClassificationResult(
+        document_id="doc-arabic-narrative",
+        classifier_id="classifier",
+        classifier_version="1",
+        source_page_count=1,
+        pages=[
+            FinancialPageClassification(
+                page_number=1,
+                label="financial_notes",
+                confidence=0.96,
+                disposition=FinancialPageDisposition.FINANCIAL,
+                selected=True,
+                source="azure_custom_classifier",
+            )
+        ],
+    )
+    # No bare currency symbol/code touching a digit, and no English financial keyword -
+    # only the Arabic context term (إيرادات, "revenue") should make this a content item.
+    text = "ارتفعت إيرادات الشركة هذا العام مقارنة بالعام الماضي."
+    document = CanonicalDocument(
+        document_id="doc-arabic-narrative",
+        filename="notes.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text=text,
+            )
+        ],
+        blocks=[
+            TextBlock(
+                block_id="revenue-note",
+                reading_order=1,
+                source_text=text,
+                source_language="ar",
+                translated_text=text,
+                spans=[Span(offset=0, length=len(text))],
+                bounding_regions=[_region(1)],
+            )
+        ],
+    )
+
+    result = FinancialExtractionService().build(
+        document,
+        classification,
+        processing_version="finance-format-1",
+    )
+
+    assert len(result.content_items) == 1
+    assert result.validation.issues == []
+
+
+def test_expanded_monetary_terms_arabic_cover_new_statement_vocabulary() -> None:
+    for term in ("مصروفات", "تكلفة", "فائدة", "ربح", "خسارة", "قرض", "صافي"):
+        assert MONETARY_CONTEXT_RE.search(term), f"{term!r} should match MONETARY_CONTEXT_RE"
+
+
+def test_currency_name_context_recognizes_arabic_currency_names() -> None:
+    assert CURRENCY_NAME_CONTEXT["ريال سعودي"] == "SAR"
+    assert CURRENCY_NAME_CONTEXT["درهم إماراتي"] == "AED"
+    assert CURRENCY_NAME_CONTEXT["دينار كويتي"] == "KWD"
+    assert CURRENCY_NAME_CONTEXT["جنيه مصري"] == "EGP"
+    assert CURRENCY_NAME_CONTEXT["يورو"] == "EUR"
 
 
 def test_financial_exports_preserve_precision_and_block_formulas() -> None:
