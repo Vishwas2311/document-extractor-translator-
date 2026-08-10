@@ -22,7 +22,12 @@ from app.schemas.page import (
     TextBlock,
 )
 from app.services.financial import (
+    CURRENCY_NAME_CONTEXT,
     CURRENCY_SYMBOLS,
+    DATE_CONTEXT_RE,
+    FINANCIAL_TERMS_CJK_RE,
+    IDENTIFIER_CONTEXT_RE,
+    MONETARY_CONTEXT_RE,
     FinancialCandidateSelector,
     FinancialExtractionService,
     financial_result_csv,
@@ -263,6 +268,121 @@ def test_financial_result_normalizes_values_and_reports_issues() -> None:
     assert result.tables[0].review_required
 
 
+def _rmb_thousands_classification() -> FinancialClassificationResult:
+    return FinancialClassificationResult(
+        document_id="doc-rmb",
+        classifier_id="test",
+        classifier_version="1",
+        source_page_count=1,
+        pages=[
+            FinancialPageClassification(
+                page_number=1,
+                label="balance_sheet",
+                confidence=0.99,
+                disposition=FinancialPageDisposition.FINANCIAL,
+                selected=True,
+                source="azure_custom_classifier",
+            )
+        ],
+    )
+
+
+def _rmb_thousands_document(cell_contents: list[str]) -> CanonicalDocument:
+    # Each amount needs an adjacent (preceding-column) label carrying a monetary term,
+    # or _semantic_type never classifies it as "monetary_amount" in the first place -
+    # matching how a real balance-sheet row ("Cash | 543,348") is laid out.
+    cells: list[TableCell] = []
+    for index, content in enumerate(cell_contents):
+        cells.append(
+            TableCell(
+                cell_id=f"label-{index}",
+                row_index=index,
+                column_index=0,
+                content="餘額",
+                bounding_regions=[_region(1)],
+            )
+        )
+        cells.append(
+            TableCell(
+                cell_id=f"amount-{index}",
+                row_index=index,
+                column_index=1,
+                content=content,
+                bounding_regions=[_region(1)],
+            )
+        )
+    return CanonicalDocument(
+        document_id="doc-rmb",
+        filename="annual-report.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text="資產負債表 單位：人民幣千元",
+            )
+        ],
+        tables=[
+            TableResult(
+                table_id="t-1",
+                row_count=len(cell_contents),
+                column_count=2,
+                cells=cells,
+            )
+        ],
+    )
+
+
+def test_infers_comma_grouping_from_uniform_rmb_thousands_table() -> None:
+    # Real "already scaled to thousands" RMB tables commonly have every value under
+    # 1,000,000 - a single comma group at most - so no cell alone ever proves comma
+    # grouping under the strong-evidence tier (which requires 2+ occurrences of the
+    # same separator in one cell). With >= 2 such single-comma cells and none
+    # conflicting, the weak-evidence fallback should resolve them, not leave every
+    # cell ambiguous.
+    document = _rmb_thousands_document(["543,348", "80,227", "118,558"])
+
+    result = FinancialExtractionService().build(
+        document,
+        _rmb_thousands_classification(),
+        processing_version="finance-1",
+    )
+
+    values = {cell.cell_id: cell.value for cell in result.tables[0].cells}
+    assert values["amount-0"].normalized_value == Decimal("543348")
+    assert values["amount-1"].normalized_value == Decimal("80227")
+    assert values["amount-2"].normalized_value == Decimal("118558")
+    for cell_id, value in values.items():
+        if cell_id.startswith("amount-"):
+            assert not value.ambiguous
+            assert not value.requires_normalized_correction
+    assert result.validation.issues == []
+
+
+def test_uniform_grouping_fallback_does_not_fire_with_one_conflicting_cell() -> None:
+    # The exact same table as above, plus one invalidly-grouped single-comma cell
+    # (e.g. an OCR artifact or a genuinely different locale). That one conflicting
+    # cell must disqualify the whole table from the weak-evidence fallback - all
+    # cells, including the previously-unambiguous ones, must stay ambiguous. This is
+    # the core safety property: the fallback never guesses through a real conflict.
+    document = _rmb_thousands_document(["543,348", "80,227", "118,558", "12,34"])
+
+    result = FinancialExtractionService().build(
+        document,
+        _rmb_thousands_classification(),
+        processing_version="finance-1",
+    )
+
+    values = {cell.cell_id: cell.value for cell in result.tables[0].cells}
+    for cell_id, value in values.items():
+        if cell_id.startswith("amount-"):
+            assert value.ambiguous
+            assert value.normalized_value is None
+
+
 def test_locale_safe_normalization_never_guesses_single_separator_values() -> None:
     service = FinancialExtractionService()
 
@@ -276,6 +396,60 @@ def test_locale_safe_normalization_never_guesses_single_separator_values() -> No
     assert not eu.ambiguous and not us.ambiguous
     assert comma_only.normalized_value is None and comma_only.ambiguous
     assert dot_only.normalized_value is None and dot_only.ambiguous
+
+
+def test_cjk_magnitude_suffixes_parse_but_stay_flagged_for_review() -> None:
+    service = FinancialExtractionService()
+
+    yi = service._normalize("1.5億")
+    wan = service._normalize("2000萬元")
+    prefixed = service._normalize("人民币2000万")
+    negative = service._normalize("(1.5億)")
+
+    assert yi.normalized_value == Decimal("150000000")
+    assert wan.normalized_value == Decimal("20000000")
+    assert prefixed.normalized_value == Decimal("20000000")
+    assert negative.normalized_value == Decimal("-150000000")
+    assert negative.negative
+    # Always review-gated in this first release, even though a value was computed -
+    # matches the app's recall-first philosophy for a newer, less-proven parser.
+    for result in (yi, wan, prefixed, negative):
+        assert result.ambiguous
+        assert result.requires_normalized_correction
+        assert result.review_reason_code == "cjk_magnitude_suffix"
+        assert result.normalization_status == "parsed"
+
+
+def test_cjk_magnitude_suffix_does_not_misfire_on_idioms_or_compounds() -> None:
+    service = FinancialExtractionService()
+
+    idiom = service._normalize("萬事如意")
+    compound = service._normalize("2億3000萬")
+
+    # No leading digit at all - never reaches the magnitude branch, falls through to
+    # the ordinary malformed/unparsed handling unchanged.
+    assert idiom.normalized_value is None
+    # Compound "implied addition" forms are explicitly out of scope - must fall
+    # through to ambiguous/unparsed exactly as before this feature existed, not
+    # silently parse only the first suffix.
+    assert compound.normalized_value is None
+
+
+def test_fullwidth_digits_and_punctuation_normalize_correctly() -> None:
+    service = FinancialExtractionService()
+
+    # A single full-width comma group, like its ASCII equivalent, needs table-wide
+    # corroborating evidence (decimal_separator) to resolve unambiguously - this is
+    # the same locale-safe guard proven in
+    # test_locale_safe_normalization_never_guesses_single_separator_values, now also
+    # correctly applying after full-width-to-ASCII translation.
+    resolved = service._normalize("１２３，４５６", decimal_separator=".")
+    unresolved = service._normalize("１２３，４５６")
+
+    assert resolved.normalized_value == Decimal("123456")
+    assert not resolved.ambiguous
+    assert unresolved.normalized_value is None
+    assert unresolved.ambiguous
 
 
 def test_only_ambiguous_monetary_values_require_normalized_corrections() -> None:
@@ -611,7 +785,109 @@ def test_layout_measurement_table_is_uncertain_not_definitively_financial() -> N
     assert page.selected
     assert page.review_required
     assert page.reasons == ["layout_measurement_table_requires_review"]
-    assert classification.classifier_version == "2.2"
+    assert classification.classifier_version == "2.3"
+
+
+def test_from_layout_selects_chinese_only_financial_table() -> None:
+    # \b-wrapped English term matching never fires on CJK text (no word boundaries
+    # between adjacent Chinese characters) - a genuine Chinese-only balance sheet must
+    # still be classified FINANCIAL via the CJK vocabulary, not left UNCERTAIN.
+    document = CanonicalDocument(
+        document_id="doc-cjk-table",
+        filename="annual-report.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text="資產負債表 單位：人民幣千元",
+            )
+        ],
+        tables=[
+            TableResult(
+                table_id="balance-sheet",
+                row_count=1,
+                column_count=1,
+                cells=[
+                    TableCell(
+                        cell_id="total-assets",
+                        row_index=0,
+                        column_index=0,
+                        content="2,543,348",
+                        bounding_regions=[_region(1)],
+                    )
+                ],
+            )
+        ],
+    )
+
+    classification = _selector().from_layout(document=document, source_page_count=1)
+
+    page = classification.pages[0]
+    assert page.disposition == FinancialPageDisposition.FINANCIAL
+    assert page.selected
+    assert not page.review_required
+    assert page.reasons == ["layout_table_and_financial_terms"]
+
+
+def test_has_financial_signal_detects_chinese_narrative() -> None:
+    classification = FinancialClassificationResult(
+        document_id="doc-cjk-narrative",
+        classifier_id="classifier",
+        classifier_version="1",
+        source_page_count=1,
+        pages=[
+            FinancialPageClassification(
+                page_number=1,
+                label="financial_notes",
+                confidence=0.96,
+                disposition=FinancialPageDisposition.FINANCIAL,
+                selected=True,
+                source="azure_custom_classifier",
+            )
+        ],
+    )
+    # No bare currency symbol/code touching a digit, and no English financial keyword -
+    # only the CJK context term (收入, "revenue") should make this a content item.
+    text = "本年度收入表現良好，較去年有所增長。"
+    document = CanonicalDocument(
+        document_id="doc-cjk-narrative",
+        filename="notes.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text=text,
+            )
+        ],
+        blocks=[
+            TextBlock(
+                block_id="revenue-note",
+                reading_order=1,
+                source_text=text,
+                source_language="zh-Hant",
+                translated_text=text,
+                spans=[Span(offset=0, length=len(text))],
+                bounding_regions=[_region(1)],
+            )
+        ],
+    )
+
+    result = FinancialExtractionService().build(
+        document,
+        classification,
+        processing_version="finance-format-1",
+    )
+
+    assert len(result.content_items) == 1
+    assert result.validation.issues == []
 
 
 def test_financial_exports_preserve_precision_and_block_formulas() -> None:
@@ -980,3 +1256,96 @@ def test_financial_narrative_does_not_require_a_table() -> None:
     assert [item.item_type for item in result.content_items] == ["key_value"]
     assert result.tables == []
     assert result.validation.issues == []
+
+
+def test_expanded_monetary_terms_cjk_cover_new_statement_vocabulary() -> None:
+    for term in ("费用", "費用", "成本", "利息", "溢利", "亏损", "虧損", "贷款", "股息", "净额"):
+        assert MONETARY_CONTEXT_RE.search(term), f"{term!r} should match MONETARY_CONTEXT_RE"
+
+
+def test_free_user_header_false_positive_is_documented() -> None:
+    # Known, accepted tradeoff of substring matching (same design already accepted for
+    # 资产/固定资产) - pinned so a future change to this doesn't silently alter
+    # classification without a conscious decision. "费用" (expense) is a genuine
+    # contiguous substring of "免费用户数量" ("number of free users").
+    assert MONETARY_CONTEXT_RE.search("免费用户数量")
+
+
+def test_expanded_financial_terms_cjk_cover_new_statement_and_governance_vocabulary() -> None:
+    for term in (
+        "存货", "商誉", "折旧", "摊销", "经营活动", "投资活动", "筹资活动",
+        "董事", "联营公司", "关联方", "审计报告", "持续经营业务", "归属",
+        "所得税", "减值", "股东",
+    ):
+        assert FINANCIAL_TERMS_CJK_RE.search(term), f"{term!r} should match FINANCIAL_TERMS_CJK_RE"
+
+
+def test_currency_name_context_recognizes_hkd_twd_mop_usd_eur_gbp_names() -> None:
+    assert CURRENCY_NAME_CONTEXT["港元"] == "HKD"
+    assert CURRENCY_NAME_CONTEXT["港幣"] == "HKD"
+    assert CURRENCY_NAME_CONTEXT["新台幣"] == "TWD"
+    assert CURRENCY_NAME_CONTEXT["澳門元"] == "MOP"
+    assert CURRENCY_NAME_CONTEXT["美元"] == "USD"
+    assert CURRENCY_NAME_CONTEXT["歐元"] == "EUR"
+    assert CURRENCY_NAME_CONTEXT["英鎊"] == "GBP"
+
+
+def test_page_with_multiple_currency_names_disables_single_currency_context() -> None:
+    document = CanonicalDocument(
+        document_id="doc-multi-currency",
+        filename="annual-report.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text="功能货币为美元，列报货币为人民币。",
+            )
+        ],
+    )
+
+    contexts = FinancialExtractionService._currency_contexts(document)
+
+    # A page naming two distinct currencies must not silently collapse to a single
+    # guessed currency - this is a correctness improvement over the prior behavior
+    # (only 人民币 was recognized, so this page previously guessed CNY alone).
+    assert 1 not in contexts
+
+
+def test_single_currency_name_still_resolves_page_context() -> None:
+    document = CanonicalDocument(
+        document_id="doc-single-currency",
+        filename="annual-report.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1,
+                page_count=1,
+                width=8.5,
+                height=11,
+                unit="inch",
+                source_text="列報貨幣為港元。",
+            )
+        ],
+    )
+
+    contexts = FinancialExtractionService._currency_contexts(document)
+
+    assert contexts[1] == "HKD"
+
+
+def test_date_context_re_recognizes_zhi_and_niandu() -> None:
+    assert DATE_CONTEXT_RE.search("截至2024年12月31日止年度")
+    assert DATE_CONTEXT_RE.search("年度报告")
+
+
+def test_bare_zhi_character_not_added_to_date_context() -> None:
+    # Confirmed decision: bare 自/至/止 are excluded because they cause a real
+    # false positive - an "automation ID" cell must still classify as an identifier,
+    # not get suppressed by DATE_CONTEXT_RE matching a bare "自" inside "自动化".
+    label_context = "自动化编号"
+    assert not DATE_CONTEXT_RE.search(label_context)
+    assert IDENTIFIER_CONTEXT_RE.search(label_context)

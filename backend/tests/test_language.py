@@ -18,6 +18,13 @@ from app.services.language import LanguageService
         ("Привет", "ru-RU", "ru-RU"),
         ("Hola", "es_419", "es-419"),
         ("Olá", "pt-BR", "pt-BR"),
+        # Azure DI tags formal-register modern Chinese (e.g. spelled-out RMB amounts)
+        # as "lzh" (Classical/Literary Chinese) in real output - fold to the
+        # script-detected bucket instead of fragmenting on a distinct tag.
+        ("人民币壹万陆仟肆佰零肆元叁角整", "lzh", "zh-Hans"),
+        ("國語體區這來對", "lzh", "zh-Hant"),
+        ("你好", "yue", "zh-Hans"),
+        ("國語體區這來對", "yue-HK", "zh-Hant"),
     ],
 )
 def test_detects_provider_languages_and_script_fallbacks(
@@ -30,9 +37,12 @@ def test_detects_provider_languages_and_script_fallbacks(
 
 @pytest.mark.parametrize(
     "language",
-    ["ar", "zh-Hans", "mixed", "fr-FR", "hi", "ru-RU", "es-419", "pt-BR"],
+    ["ar", "zh-Hans", "mixed", "fr-FR", "hi", "ru-RU", "es-419", "pt-BR", "lzh", "yue"],
 )
 def test_any_valid_detected_non_english_language_is_translated(language: str) -> None:
+    # "lzh"/"yue" as raw, undetected values must still route for translation - the
+    # detect()-time folding to zh-Hant/zh-Hans is a separate concern from this
+    # should_translate check never dropping a block outright.
     assert LanguageService.should_translate(language)
 
 

@@ -44,6 +44,19 @@ CURRENCY_NAME_CONTEXT = {
     "yuan": "CNY",
     "\u5186": "JPY",
     "yen": "JPY",
+    "\u6e2f\u5143": "HKD",
+    "\u6e2f\u5e63": "HKD",
+    "\u6e2f\u5e01": "HKD",
+    "\u65b0\u53f0\u5e63": "TWD",
+    "\u65b0\u53f0\u5e01": "TWD",
+    "\u6fb3\u9580\u5143": "MOP",
+    "\u7f8e\u5143": "USD",
+    "\u6b50\u5143": "EUR",
+    "\u6b27\u5143": "EUR",
+    "\u82f1\u938a": "GBP",
+    "\u82f1\u9551": "GBP",
+    "\u65e5\u5143": "JPY",
+    "\u65e5\u5713": "JPY",
 }
 
 FINANCIAL_TERMS = {
@@ -81,7 +94,69 @@ FINANCIAL_CONTEXT_TERMS = FINANCIAL_TERMS | {
     "turnover",
     "year ended",
 }
+# Shared CJK/Arabic monetary vocabulary - single source of truth for MONETARY_CONTEXT_RE
+# (per-cell semantic typing) below, reused here for page-level classification so the two
+# never drift out of sync again.
+MONETARY_TERMS_LATIN = (
+    "amount", "asset", "liability", "balance", "debit", "credit", "income", "expense",
+    "revenue", "cost", "price", "subtotal", "total", "tax", "payment", "refund",
+    "opening", "closing", "payable", "receivable",
+)
+MONETARY_TERMS_CJK = (
+    "金额", "金額", "余额", "餘額", "支出", "收入", "单价", "單價", "合计", "合計",
+    "税额", "稅額", "借方", "贷方", "貸方", "应收", "应付", "應收", "應付",
+    "费用", "費用", "成本", "利息", "溢利", "亏损", "虧損", "贷款", "貸款", "借款",
+    "股息", "净额", "淨額",
+)
+MONETARY_TERMS_ARABIC = ("مبلغ", "رصيد", "إجمالي", "ضريبة", "مدين", "دائن")
+# Page-level financial vocabulary (broader than the per-cell monetary terms above - also
+# needs document-identifying terms like "balance sheet"/"annual report"). Covers both
+# Simplified and Traditional Chinese since real-world filers use either.
+FINANCIAL_TERMS_CJK = MONETARY_TERMS_CJK + (
+    "资产", "資產", "负债", "負債", "现金", "現金", "利润", "利潤", "损益", "損益",
+    "资产负债表", "資產負債表", "财务报表", "財務報表", "年度报告", "年度報告",
+    "股东权益", "股東權益", "营业收入", "營業收入", "毛利", "净利", "淨利",
+    # Balance sheet
+    "流动资产", "流動資產", "存货", "存貨", "商誉", "商譽", "股本", "权益", "權益",
+    # Income statement
+    "折旧", "折舊", "摊销", "攤銷", "每股收益", "每股盈利",
+    # Cash flow statement
+    "经营活动", "經營活動", "投资活动", "投資活動", "筹资活动", "籌資活動",
+    # Notes / governance
+    "董事", "联营公司", "聯營公司", "合营公司", "合營公司", "关联方", "關聯方",
+    "审计报告", "審計報告", "汇率", "匯率",
+    # User-confirmed set from the earlier document review
+    "所得税", "所得稅", "减值", "減值", "盈利", "股东", "股東", "每股",
+    "持续经营业务", "持續經營業務", "归属", "歸屬", "综合", "綜合", "合并", "合併",
+)
+FINANCIAL_CONTEXT_TERMS_CJK = FINANCIAL_TERMS_CJK
+# CJK has no whitespace between words, so \b (a \w/non-\w transition) never falls between
+# two adjacent CJK characters - a \b-wrapped search for "資產" inside "資產負債表" never
+# matches. Plain substring alternation (no \b) is required for these terms; this mirrors
+# the strategy MONETARY_CONTEXT_RE already uses below, which is why it "just works" for
+# CJK while the \b-wrapped FINANCIAL_TERMS loop does not.
+FINANCIAL_TERMS_CJK_RE = re.compile("|".join(re.escape(term) for term in FINANCIAL_TERMS_CJK))
+FINANCIAL_CONTEXT_TERMS_CJK_RE = re.compile(
+    "|".join(re.escape(term) for term in FINANCIAL_CONTEXT_TERMS_CJK)
+)
 NUMBER_RE = re.compile(r"^[+-]?\d[\d., ]*$")
+# Full-width digits already parse correctly via Python's Unicode-aware \d/Decimal() -
+# only the CJK-typeset punctuation needs an explicit mapping to ASCII before the rest
+# of the numeric-parsing logic (which is ASCII-only) can see it.
+FULLWIDTH_PUNCTUATION_TRANSLATION = str.maketrans({"，": ",", "．": "."})
+# CJK numeral magnitude suffixes: 億/亿 = hundred million (10^8), 萬/万 = ten thousand
+# (10^4). Deliberately restricted to a single plain integer/decimal followed by exactly
+# one suffix (and an optional trailing currency unit) - comma-grouped values and
+# compound forms like "2億3000萬" (implied addition) are out of scope and fall through
+# unchanged to the existing ambiguous/unparsed handling.
+CJK_MAGNITUDE_RE = re.compile(
+    r"^(?P<number>\d+(?:\.\d+)?)\s*(?P<magnitude>億|亿|萬|万)\s*(?:元|圆|圓)?$"
+)
+CJK_MAGNITUDE_MULTIPLIERS = {"億": 10**8, "亿": 10**8, "萬": 10**4, "万": 10**4}
+# Minimum uniformly-comma-grouped cells required before _infer_decimal_separator's
+# weak-evidence fallback treats the pattern as "this table uses comma grouping" rather
+# than a coincidence in a small/sparse table.
+WEAK_EVIDENCE_MIN_CELLS = 2
 PERCENTAGE_RANGE_RE = re.compile(
     r"^\s*[+-]?\d+(?:[.,]\d+)?\s*%\s*(?:-|\u2013|\u2014|~|to|\u81f3|\u5230)\s*"
     r"[+-]?\d+(?:[.,]\d+)?\s*%\s*$",
@@ -94,7 +169,7 @@ DATE_OR_TIME_RE = re.compile(
     r"\b\d{1,2}:\d{2}(?::\d{2})?\b)"
 )
 DATE_CONTEXT_RE = re.compile(
-    r"(?:date|time|period|from|through|\u65e5\u671f|\u65f6\u95f4|\u671f\u95f4|\u671f\u9593|"
+    r"(?:date|time|period|from|through|\u65e5\u671f|\u65f6\u95f4|\u671f\u95f4|\u671f\u9593|\u622a\u81f3|\u5e74\u5ea6|"
     r"\u062a\u0627\u0631\u064a\u062e|\u0648\u0642\u062a|\u0641\u062a\u0631\u0629)",
     re.IGNORECASE,
 )
@@ -127,12 +202,10 @@ QUANTITY_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 MONETARY_CONTEXT_RE = re.compile(
-    r"(?:amount|asset|liability|balance|debit|credit|income|expense|revenue|cost|price|subtotal|"
-    r"total|tax|payment|refund|opening|closing|payable|receivable|"
-    r"\u91d1\u989d|\u91d1\u984d|\u4f59\u989d|\u9918\u984d|\u652f\u51fa|\u6536\u5165|"
-    r"\u5355\u4ef7|\u55ae\u50f9|\u5408\u8ba1|\u5408\u8a08|\u7a0e\u989d|\u7a05\u984d|"
-    r"\u501f\u65b9|\u8d37\u65b9|\u8cb8\u65b9|\u5e94\u6536|\u5e94\u4ed8|\u61c9\u6536|\u61c9\u4ed8|"
-    r"\u0645\u0628\u0644\u063a|\u0631\u0635\u064a\u062f|\u0625\u062c\u0645\u0627\u0644\u064a|\u0636\u0631\u064a\u0628\u0629|\u0645\u062f\u064a\u0646|\u062f\u0627\u0626\u0646)",
+    "|".join(
+        re.escape(term)
+        for term in MONETARY_TERMS_LATIN + MONETARY_TERMS_CJK + MONETARY_TERMS_ARABIC
+    ),
     re.IGNORECASE,
 )
 KEY_VALUE_RE = re.compile(r"^\s*([^:\n：]{1,120})\s*[:：]\s*(.+?)\s*$", re.DOTALL)
@@ -476,7 +549,7 @@ class FinancialCandidateSelector:
                 1
                 for term in FINANCIAL_TERMS
                 if re.search(rf"\b{re.escape(term)}\b", text)
-            )
+            ) + len(FINANCIAL_TERMS_CJK_RE.findall(text))
             has_table = page_number in tables_by_page
             structural_value_hits = len(FINANCIAL_VALUE_RE.findall(text))
             explicit_currency_hits = len(CURRENCY_CODE_RE.findall(text)) + sum(
@@ -529,7 +602,7 @@ class FinancialCandidateSelector:
         return FinancialClassificationResult(
             document_id=document.document_id,
             classifier_id="layout-rules",
-            classifier_version="2.2",
+            classifier_version="2.3",
             selection_policy_fingerprint=self.policy_fingerprint,
             source_page_count=source_page_count,
             pages=pages,
@@ -577,6 +650,8 @@ class FinancialExtractionService:
             re.search(rf"\b{re.escape(term)}\b", folded)
             for term in FINANCIAL_CONTEXT_TERMS
         ):
+            return True
+        if FINANCIAL_CONTEXT_TERMS_CJK_RE.search(text):
             return True
         return bool(FINANCIAL_VALUE_RE.search(text))
 
@@ -1098,8 +1173,26 @@ class FinancialExtractionService:
 
     @classmethod
     def _infer_decimal_separator(cls, cells: list[TableCell]) -> str | None:
-        """Infer a table decimal separator only from strong formatting evidence."""
+        """Infer a table decimal separator from strong formatting evidence, falling
+        back to weak evidence only when nothing conflicts.
+
+        Strong evidence: a cell with both "," and "." (their relative order settles
+        which is the decimal point), or a single separator appearing 2+ times with
+        valid 3-digit grouping (e.g. "1,234,567" - unambiguously thousands grouping).
+
+        Real "already scaled to thousands" tables (e.g. RMB/USD figures under a
+        "thousands" header) commonly have every value under 1,000,000 - a single comma
+        group at most - so no cell ever reaches the strong-evidence bar, and every
+        such cell was previously left ambiguous. The weak-evidence fallback below
+        recognizes a table where every single-comma cell has valid 3-digit grouping
+        and none conflicts (an invalidly-grouped single-comma cell, e.g. "12,34",
+        disqualifies the whole table) as comma-thousands evidence - extending the same
+        grouping assumption the strong tier already makes, just without requiring a
+        second comma group to prove it.
+        """
         signals: set[str] = set()
+        comma_grouped = 0
+        comma_ungrouped = 0
         for cell in cells:
             candidate = cls._numeric_candidate(cell.content)
             if candidate is None:
@@ -1111,7 +1204,20 @@ class FinancialExtractionService:
                 signals.add(".")
             elif unsigned.count(".") > 1 and cls._valid_grouped_integer(unsigned, "."):
                 signals.add(",")
-        return next(iter(signals)) if len(signals) == 1 else None
+            elif unsigned.count(",") == 1:
+                if cls._valid_grouped_integer(unsigned, ","):
+                    comma_grouped += 1
+                else:
+                    comma_ungrouped += 1
+        if len(signals) == 1:
+            return next(iter(signals))
+        if (
+            not signals
+            and comma_ungrouped == 0
+            and comma_grouped >= WEAK_EVIDENCE_MIN_CELLS
+        ):
+            return "."
+        return None
 
     @staticmethod
     def _valid_grouped_integer(value: str, separator: str) -> bool:
@@ -1123,6 +1229,7 @@ class FinancialExtractionService:
     @staticmethod
     def _numeric_candidate(raw_text: str) -> str | None:
         text = raw_text.strip().replace("\u00a0", " ")
+        text = text.translate(FULLWIDTH_PUNCTUATION_TRANSLATION)
         if not text:
             return None
         has_open_parenthesis = text.startswith("(")
@@ -1253,6 +1360,39 @@ class FinancialExtractionService:
             )
         parenthesized_negative = text.startswith("(") and text.endswith(")")
         percentage = text.endswith("%")
+        if semantic_type == "monetary_amount":
+            magnitude_source = text[1:-1].strip() if parenthesized_negative else text
+            magnitude_source = magnitude_source.translate(FULLWIDTH_PUNCTUATION_TRANSLATION)
+            for name in sorted(CURRENCY_NAME_CONTEXT, key=len, reverse=True):
+                if magnitude_source.startswith(name):
+                    magnitude_source = magnitude_source[len(name) :].strip()
+                    break
+            for symbol in CURRENCY_SYMBOL_CANDIDATES:
+                magnitude_source = magnitude_source.replace(symbol, "")
+            magnitude_source = CURRENCY_CODE_RE.sub("", magnitude_source).strip()
+            magnitude_match = CJK_MAGNITUDE_RE.match(magnitude_source)
+            if magnitude_match:
+                # A distinct code path from the comma/dot ambiguity logic below - it
+                # never runs on this input. Always flagged for reviewer sign-off in
+                # this first release (requires_normalized_correction=True) even though
+                # a value was computed, matching the app's recall-first philosophy for
+                # a newer, less-proven parsing feature.
+                magnitude_value = Decimal(
+                    magnitude_match.group("number")
+                ) * CJK_MAGNITUDE_MULTIPLIERS[magnitude_match.group("magnitude")]
+                if parenthesized_negative:
+                    magnitude_value = -magnitude_value
+                return NormalizedFinancialValue(
+                    raw_text=raw_text,
+                    semantic_type=semantic_type,
+                    **currency_fields,
+                    normalized_value=magnitude_value,
+                    negative=parenthesized_negative,
+                    ambiguous=True,
+                    requires_normalized_correction=True,
+                    review_reason_code="cjk_magnitude_suffix",
+                    normalization_status="parsed",
+                )
         candidate = cls._numeric_candidate(raw_text)
         if candidate is None:
             return NormalizedFinancialValue(

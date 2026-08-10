@@ -49,6 +49,14 @@ class LanguageService:
         has_latin = bool(LATIN_RE.search(text))
         if hint == "en" and (has_arabic or has_han):
             return "mixed"
+        if hint is not None and hint.split("-")[0] in {"lzh", "yue"}:
+            # Classical/Literary Chinese and Cantonese hints are real DI output on
+            # formal-register modern text (e.g. spelled-out RMB amounts get tagged
+            # "lzh") - fold to the script-detected zh-Hant/zh-Hans bucket so dedup and
+            # the translation prompt treat them like any other Chinese block, instead
+            # of fragmenting on a distinct tag or risking archaic-register output.
+            if has_han:
+                return self._han_script(text)
         if hint is not None:
             return hint
         if (has_arabic or has_han) and has_latin:
@@ -58,12 +66,16 @@ class LanguageService:
         if has_arabic:
             return "ar"
         if has_han:
-            if any(character in TRADITIONAL_MARKERS for character in text):
-                return "zh-Hant"
-            return "zh-Hans"
+            return self._han_script(text)
         # Latin script alone is not evidence of English. Document Intelligence
         # language hints are authoritative; missing hints fail toward review.
         return "und"
+
+    @staticmethod
+    def _han_script(text: str) -> str:
+        if any(character in TRADITIONAL_MARKERS for character in text):
+            return "zh-Hant"
+        return "zh-Hans"
 
     def enrich(self, blocks: list[TextBlock]) -> list[TextBlock]:
         for block in blocks:
