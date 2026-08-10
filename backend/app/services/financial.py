@@ -57,6 +57,19 @@ CURRENCY_NAME_CONTEXT = {
     "\u82f1\u9551": "GBP",
     "\u65e5\u5143": "JPY",
     "\u65e5\u5713": "JPY",
+    "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a": "SAR",
+    "\u0631\u064a\u0627\u0644": "SAR",
+    "\u062f\u0631\u0647\u0645 \u0625\u0645\u0627\u0631\u0627\u062a\u064a": "AED",
+    "\u062f\u0631\u0647\u0645": "AED",
+    "\u062f\u064a\u0646\u0627\u0631 \u0643\u0648\u064a\u062a\u064a": "KWD",
+    "\u062c\u0646\u064a\u0647 \u0645\u0635\u0631\u064a": "EGP",
+    "\u062c\u0646\u064a\u0647": "EGP",
+    "\u062f\u064a\u0646\u0627\u0631 \u0628\u062d\u0631\u064a\u0646\u064a": "BHD",
+    "\u0631\u064a\u0627\u0644 \u0642\u0637\u0631\u064a": "QAR",
+    "\u062f\u064a\u0646\u0627\u0631 \u0623\u0631\u062f\u0646\u064a": "JOD",
+    "\u062f\u0648\u0644\u0627\u0631 \u0623\u0645\u0631\u064a\u0643\u064a": "USD",
+    "\u062f\u0648\u0644\u0627\u0631": "USD",
+    "\u064a\u0648\u0631\u0648": "EUR",
 }
 
 FINANCIAL_TERMS = {
@@ -108,7 +121,10 @@ MONETARY_TERMS_CJK = (
     "费用", "費用", "成本", "利息", "溢利", "亏损", "虧損", "贷款", "貸款", "借款",
     "股息", "净额", "淨額",
 )
-MONETARY_TERMS_ARABIC = ("مبلغ", "رصيد", "إجمالي", "ضريبة", "مدين", "دائن")
+MONETARY_TERMS_ARABIC = (
+    "مبلغ", "رصيد", "إجمالي", "ضريبة", "مدين", "دائن",
+    "مصروفات", "تكلفة", "فائدة", "ربح", "خسارة", "قرض", "توزيعات أرباح", "صافي",
+)
 # Page-level financial vocabulary (broader than the per-cell monetary terms above - also
 # needs document-identifying terms like "balance sheet"/"annual report"). Covers both
 # Simplified and Traditional Chinese since real-world filers use either.
@@ -138,6 +154,35 @@ FINANCIAL_CONTEXT_TERMS_CJK = FINANCIAL_TERMS_CJK
 FINANCIAL_TERMS_CJK_RE = re.compile("|".join(re.escape(term) for term in FINANCIAL_TERMS_CJK))
 FINANCIAL_CONTEXT_TERMS_CJK_RE = re.compile(
     "|".join(re.escape(term) for term in FINANCIAL_CONTEXT_TERMS_CJK)
+)
+# Page-level Arabic financial vocabulary, mirroring FINANCIAL_TERMS_CJK above.
+FINANCIAL_TERMS_ARABIC = MONETARY_TERMS_ARABIC + (
+    # Balance sheet
+    "أصول", "خصوم", "التزامات", "حقوق الملكية", "أصول متداولة", "أصول غير متداولة",
+    "مخزون", "شهرة", "رأس المال",
+    # Income statement
+    "إيرادات", "إهلاك", "إطفاء", "ربح السهم",
+    # Cash flow statement
+    "التدفقات النقدية", "الأنشطة التشغيلية", "الأنشطة الاستثمارية", "الأنشطة التمويلية",
+    # Notes / governance
+    "مجلس الإدارة", "شركة زميلة", "شركة تابعة", "أطراف ذات علاقة", "تقرير المراجعة",
+    "سعر الصرف",
+    # Statement identification
+    "الميزانية العمومية", "قائمة الدخل", "التقرير السنوي", "القوائم المالية",
+)
+FINANCIAL_CONTEXT_TERMS_ARABIC = FINANCIAL_TERMS_ARABIC
+# Arabic uses spaces between separate words, but single-letter prefixes (the definite
+# article "ال", conjunctions/prepositions "و"/"ب"/"ل"/"ك") attach directly to the
+# following word with no space - e.g. "الأصول" ("the assets") has no \w/non-\w
+# transition before "أصول", so a \b-wrapped search for "أصول" never matches text
+# containing "الأصول", exactly as CJK's total lack of spacing defeats \b above (a
+# different cause, the same practical failure). Plain substring alternation is
+# required here too, matching MONETARY_CONTEXT_RE's existing (correct) approach.
+FINANCIAL_TERMS_ARABIC_RE = re.compile(
+    "|".join(re.escape(term) for term in FINANCIAL_TERMS_ARABIC)
+)
+FINANCIAL_CONTEXT_TERMS_ARABIC_RE = re.compile(
+    "|".join(re.escape(term) for term in FINANCIAL_CONTEXT_TERMS_ARABIC)
 )
 NUMBER_RE = re.compile(r"^[+-]?\d[\d., ]*$")
 # Full-width digits already parse correctly via Python's Unicode-aware \d/Decimal() -
@@ -545,11 +590,15 @@ class FinancialCandidateSelector:
                 if page_number in metadata
                 else ""
             )
-            term_hits = sum(
-                1
-                for term in FINANCIAL_TERMS
-                if re.search(rf"\b{re.escape(term)}\b", text)
-            ) + len(FINANCIAL_TERMS_CJK_RE.findall(text))
+            term_hits = (
+                sum(
+                    1
+                    for term in FINANCIAL_TERMS
+                    if re.search(rf"\b{re.escape(term)}\b", text)
+                )
+                + len(FINANCIAL_TERMS_CJK_RE.findall(text))
+                + len(FINANCIAL_TERMS_ARABIC_RE.findall(text))
+            )
             has_table = page_number in tables_by_page
             structural_value_hits = len(FINANCIAL_VALUE_RE.findall(text))
             explicit_currency_hits = len(CURRENCY_CODE_RE.findall(text)) + sum(
@@ -602,7 +651,7 @@ class FinancialCandidateSelector:
         return FinancialClassificationResult(
             document_id=document.document_id,
             classifier_id="layout-rules",
-            classifier_version="2.3",
+            classifier_version="2.4",
             selection_policy_fingerprint=self.policy_fingerprint,
             source_page_count=source_page_count,
             pages=pages,
@@ -652,6 +701,8 @@ class FinancialExtractionService:
         ):
             return True
         if FINANCIAL_CONTEXT_TERMS_CJK_RE.search(text):
+            return True
+        if FINANCIAL_CONTEXT_TERMS_ARABIC_RE.search(text):
             return True
         return bool(FINANCIAL_VALUE_RE.search(text))
 
