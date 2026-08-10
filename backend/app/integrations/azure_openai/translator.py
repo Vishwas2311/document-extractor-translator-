@@ -9,6 +9,7 @@ from openai import (
 )
 from tenacity import (
     AsyncRetrying,
+    RetryCallState,
     retry_if_exception_type,
     stop_after_attempt,
     wait_random_exponential,
@@ -18,6 +19,25 @@ from app.core.config import Settings
 from app.core.exceptions import AzureServiceError, ConfigurationError
 from app.prompts.translation import TRANSLATION_DEVELOPER_PROMPT
 from app.schemas.translation import TranslationBatchRequest, TranslationBatchResponse
+
+_FALLBACK_WAIT = wait_random_exponential(multiplier=1, max=20)
+_MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
+
+
+def translation_retry_wait(retry_state: RetryCallState) -> float:
+    """Honor Azure's own `Retry-After` header on a 429 instead of guessing with blind
+    backoff. Retrying before Azure's advertised cooldown just spends an attempt to get
+    rate-limited again, so a real header value takes priority; anything else (or a
+    missing/unparseable header) falls back to the existing random exponential wait."""
+    exception = retry_state.outcome.exception() if retry_state.outcome else None
+    if isinstance(exception, RateLimitError):
+        retry_after = exception.response.headers.get("retry-after")
+        if retry_after is not None:
+            try:
+                return min(float(retry_after), _MAX_RATE_LIMIT_WAIT_SECONDS)
+            except ValueError:
+                pass
+    return _FALLBACK_WAIT(retry_state)
 
 
 class AzureOpenAITranslator:
@@ -56,7 +76,7 @@ class AzureOpenAITranslator:
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self.settings.azure_max_retries),
-                wait=wait_random_exponential(multiplier=1, max=20),
+                wait=translation_retry_wait,
                 retry=retry_if_exception_type(retry_types),
                 reraise=True,
             ):
