@@ -508,30 +508,45 @@ class ProcessingService:
         request: TranslationBatchRequest,
         inputs: list[TranslationInput],
     ) -> tuple[TranslationBatchResponse, dict[str, str]]:
+        cached_response: TranslationBatchResponse | None = None
         if self.storage.exists(document_id, artifact):
             cached = await self.storage.read_json(document_id, artifact)
             if cached.get("input_hash") == input_hash:
-                response = TranslationBatchResponse.model_validate(cached["response"])
-                invalid = self.validator.validate(inputs, response)
-                if not invalid:
-                    return response, invalid
-                # The cached response has per-item validation failures (e.g. a
-                # mangled protected token). Don't keep serving the same bad result
-                # on every resume retry (RetryMode.RESUME doesn't clear this cache,
-                # only RETRANSLATE does, and that nukes every batch, not just this
-                # one) - fall through and ask the model again instead.
-        response = await self.translator.translate(request)
-        invalid = self.validator.validate(inputs, response)
-        if not invalid:
-            await self.storage.write_json(
-                document_id,
-                artifact,
-                {
-                    "input_hash": input_hash,
-                    "prompt_version": TRANSLATION_PROMPT_VERSION,
-                    "response": response.model_dump(mode="json"),
-                },
+                cached_response = TranslationBatchResponse.model_validate(cached["response"])
+
+        if cached_response is not None:
+            invalid = self.validator.validate(inputs, cached_response)
+            if not invalid:
+                return cached_response, invalid
+            # Some cached items still fail validation (e.g. a mangled protected
+            # token). Re-request only those specific blocks live - not the whole
+            # batch, which would risk drifting the wording of blocks that already
+            # translated correctly and cost extra API calls for no reason - and not
+            # just re-serving the same cached bad result forever either.
+            retry_inputs = [item for item in inputs if item.block_id in invalid]
+            retry_request = TranslationBatchRequest(
+                target_language=request.target_language, blocks=retry_inputs
             )
+            fresh_response = await self.translator.translate(retry_request)
+            merged_by_id = {item.block_id: item for item in cached_response.translations}
+            for item in fresh_response.translations:
+                merged_by_id[item.block_id] = item
+            response = TranslationBatchResponse(
+                translations=[merged_by_id[item.block_id] for item in inputs]
+            )
+        else:
+            response = await self.translator.translate(request)
+
+        invalid = self.validator.validate(inputs, response)
+        await self.storage.write_json(
+            document_id,
+            artifact,
+            {
+                "input_hash": input_hash,
+                "prompt_version": TRANSLATION_PROMPT_VERSION,
+                "response": response.model_dump(mode="json"),
+            },
+        )
         return response, invalid
 
     async def _translate(
