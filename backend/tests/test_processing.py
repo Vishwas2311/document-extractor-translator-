@@ -7,10 +7,12 @@ import pytest
 from app.core.config import Settings
 from app.core.enums import ProcessingProfile, TranslationStatus
 from app.core.exceptions import PolicyBlockedError
+from app.prompts.translation import TRANSLATION_PROMPT_VERSION
 from app.schemas.page import CanonicalDocument, PageMetadata, TableCell, TableResult, TextBlock
 from app.schemas.translation import (
     TranslationBatchRequest,
     TranslationBatchResponse,
+    TranslationInput,
     TranslationItem,
 )
 from app.services.language import LanguageService
@@ -114,10 +116,90 @@ class FakeTranslator:
                 TranslationItem(
                     block_id=item.block_id,
                     translated_text="English: " + item.source_text,
+                    # A real model confirms (or resolves) the language from the text
+                    # itself; echoing back what it was told simulates "confirmed", and
+                    # echoing "und" back correctly simulates "still couldn't tell" -
+                    # normalize_detected_language() treats "und" as no answer either way.
+                    detected_language=item.source_language,
                 )
                 for item in request.blocks
             ]
         )
+
+
+class TogglingTranslator:
+    """Mangles the protected token on the first call; translates it faithfully
+    (correctly) on every call after."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        self.calls += 1
+        translated = "Case forty-two" if self.calls == 1 else "CASE-42 confirmed"
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text=translated)
+                for item in request.blocks
+            ]
+        )
+
+
+async def test_invalid_batch_response_is_not_cached_and_retry_calls_live() -> None:
+    # A batch with a per-item validation failure must not be persisted - a resume
+    # retry (which doesn't clear this cache) would otherwise just replay the same
+    # bad translation forever instead of ever asking the model again.
+    storage = MemoryStorage()
+    translator = TogglingTranslator()
+    service = _service(storage=storage, translator=translator)
+    inputs = [TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42")]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+    document_id = "doc-cache-test"
+
+    _response, invalid = await service._resolve_batch_translation(
+        document_id, artifact, "hash-1", request, inputs
+    )
+    assert "b1" in invalid
+    assert not storage.exists(document_id, artifact)
+    assert translator.calls == 1
+
+    # Requesting the same batch again (e.g. a resume retry) must call the
+    # translator live again, not be satisfied by a (nonexistent) stale cache.
+    response, invalid = await service._resolve_batch_translation(
+        document_id, artifact, "hash-1", request, inputs
+    )
+    assert invalid == {}
+    assert response.translations[0].translated_text == "CASE-42 confirmed"
+    assert translator.calls == 2
+    assert storage.exists(document_id, artifact)
+
+
+async def test_resolve_batch_translation_bypasses_a_stale_invalid_cache() -> None:
+    # Simulates an artifact written before this fix, back when invalid responses
+    # were cached unconditionally - reading it back must not just replay the bad
+    # translation; it must fall through to a live call instead.
+    storage = MemoryStorage()
+    artifact = "translations/batch-0001.json"
+    document_id = "doc-stale-cache"
+    storage.payloads[artifact] = {
+        "input_hash": "hash-1",
+        "prompt_version": TRANSLATION_PROMPT_VERSION,
+        "response": TranslationBatchResponse(
+            translations=[TranslationItem(block_id="b1", translated_text="Case forty-two")]
+        ).model_dump(mode="json"),
+    }
+    translator = FakeTranslator()
+    service = _service(storage=storage, translator=translator)
+    inputs = [TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42")]
+    request = TranslationBatchRequest(blocks=inputs)
+
+    response, invalid = await service._resolve_batch_translation(
+        document_id, artifact, "hash-1", request, inputs
+    )
+
+    assert invalid == {}
+    assert response.translations[0].translated_text == "English: CASE-42"
 
 
 async def test_translates_table_cells_with_stable_ids() -> None:
@@ -167,7 +249,12 @@ async def test_translates_table_cells_with_stable_ids() -> None:
 
 
 
-async def test_routes_generic_detected_language_and_reviews_unknown_latin() -> None:
+async def test_routes_generic_detected_language_and_translates_unhinted_text() -> None:
+    # A block with no DI hint and a script the local heuristic doesn't recognize
+    # ("und") must still reach the translation model instead of stalling in review -
+    # this is the fix for the class of bug where any language not covered by the
+    # local Arabic/Han regex heuristic (Korean, Thai, unhinted Latin, ...) never got
+    # a translation attempt at all.
     storage = MemoryStorage()
     service = _service(storage=storage, translator=FakeTranslator())
     document = CanonicalDocument(
@@ -184,11 +271,12 @@ async def test_routes_generic_detected_language_and_reviews_unknown_latin() -> N
             )
         ],
         blocks=[
+            # A benchmarked language (Chinese) with no explicit hint - Han script
+            # detection alone should route and translate it cleanly, no review flag.
             TextBlock(
-                block_id="b-fr",
+                block_id="b-zh",
                 reading_order=1,
-                source_text="Chiffre d'affaires",
-                source_language="fr-FR",
+                source_text="业务收入",
             ),
             TextBlock(
                 block_id="b-en",
@@ -208,15 +296,100 @@ async def test_routes_generic_detected_language_and_reviews_unknown_latin() -> N
         document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
     )
 
+    # The Chinese block translates cleanly with no review flag; the "und" block
+    # forces review_required because even the model couldn't identify it.
     assert review_required
-    french, english, unknown = document.blocks
-    assert french.translation_status == TranslationStatus.TRANSLATED
-    assert french.translated_text == "English: Chiffre d'affaires"
+    chinese, english, unknown = document.blocks
+    assert chinese.translation_status == TranslationStatus.TRANSLATED
+    assert chinese.translated_text == "English: 业务收入"
+    assert not chinese.review_required
     assert english.translation_status == TranslationStatus.NOT_REQUIRED
     assert english.translated_text == "Revenue"
     assert unknown.source_language == "und"
-    assert unknown.translation_status == TranslationStatus.NEEDS_REVIEW
-    assert unknown.translated_text is None
+    assert unknown.translation_status == TranslationStatus.TRANSLATED
+    assert unknown.translated_text == "English: Texto sin etiqueta"
+    assert unknown.review_required
+    assert unknown.warnings == [
+        "Translated, but the source language could not be confirmed - please verify."
+    ]
+
+
+class DetectedLanguageTranslator:
+    """Reports back a detected_language the local heuristic couldn't have known -
+    stands in for the real model correcting an "und" guess from its own read of the
+    text, e.g. a language the local Arabic/Han-only script heuristic has never
+    special-cased (Korean, in this case)."""
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(
+                    block_id=item.block_id,
+                    translated_text="English: " + item.source_text,
+                    detected_language="ko-KR",
+                )
+                for item in request.blocks
+            ]
+        )
+
+
+async def test_model_detected_language_corrects_source_language() -> None:
+    # The local script heuristic only special-cases Arabic and Han - it has no idea
+    # Korean exists, so it tags Korean text "und". Once the translation model reads
+    # the actual text and reports back what it detected, that must override the
+    # local guess so the UI shows the real language, not "Unknown language" forever.
+    storage = MemoryStorage()
+    service = _service(storage=storage, translator=DetectedLanguageTranslator())
+    document = CanonicalDocument(
+        document_id="doc-korean",
+        filename="korean.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(block_id="b-ko", reading_order=1, source_text="안녕하세요"),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+    block = document.blocks[0]
+
+    assert block.translation_status == TranslationStatus.TRANSLATED
+    assert block.translated_text == "English: 안녕하세요"
+    assert block.source_language == "ko-KR"
+    # Korean isn't in the benchmarked set (Arabic, Chinese, English) - flagged for
+    # review, but still translated and shown, never blocked.
+    assert review_required
+    assert block.review_required
+    assert any("benchmarked set" in warning for warning in block.warnings)
+
+
+async def test_benchmarked_language_translates_with_no_review_flag() -> None:
+    # Contrast with the Korean case above: a language already in the benchmarked
+    # set must not get the out-of-benchmark flag just because should_translate()
+    # routed it through the model.
+    storage = MemoryStorage()
+    service = _service(storage=storage, translator=FakeTranslator())
+    document = CanonicalDocument(
+        document_id="doc-arabic",
+        filename="arabic.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(block_id="b-ar", reading_order=1, source_text="مرحبا بكم"),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+    block = document.blocks[0]
+
+    assert block.translation_status == TranslationStatus.TRANSLATED
+    assert block.source_language == "ar"
+    assert not block.review_required
+    assert not review_required
 
 
 async def test_numeric_only_blocks_do_not_force_review() -> None:
@@ -361,8 +534,8 @@ class NoOpTranslationValidator:
     missing block_id must still fail closed *for that block only*, not raise an
     unhandled KeyError that takes down the whole document."""
 
-    def validate(self, inputs: list[object], response: TranslationBatchResponse) -> None:
-        return None
+    def validate(self, inputs: list[object], response: TranslationBatchResponse) -> dict[str, str]:
+        return {}
 
 
 async def test_batch_translation_missing_block_id_is_isolated_per_block() -> None:
@@ -431,6 +604,63 @@ async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -
     assert first.translation_status == TranslationStatus.FAILED
     assert second.translation_status == TranslationStatus.FAILED
     assert any("Translation failed" in warning for warning in first.warnings)
+
+
+class ProtectedTokenDriftTranslator:
+    """Translates every block correctly except one, which drops its protected
+    numeric/code token - exercises the real (non-stubbed) `TranslationValidator`
+    end-to-end through `_translate`."""
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        translations = []
+        for item in request.blocks:
+            if item.block_id == "b-bad":
+                translations.append(
+                    TranslationItem(block_id=item.block_id, translated_text="Case forty-two")
+                )
+            else:
+                translations.append(
+                    TranslationItem(
+                        block_id=item.block_id, translated_text="English: " + item.source_text
+                    )
+                )
+        return TranslationBatchResponse(translations=translations)
+
+
+async def test_protected_token_drift_fails_only_the_offending_block() -> None:
+    # One block whose protected token (e.g. a page number, case code, or acronym)
+    # changed in translation must not take down unrelated blocks in the same batch -
+    # this is what produced "table translated, body text stuck pending" on real
+    # documents before the validator started reporting per-block instead of raising
+    # for the whole batch.
+    storage = MemoryStorage()
+    service = _service(storage=storage, translator=ProtectedTokenDriftTranslator())
+    document = CanonicalDocument(
+        document_id="doc-token-drift",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(
+                block_id="b-bad", reading_order=1, source_text="CASE-42", source_language="ar"
+            ),
+            TextBlock(
+                block_id="b-good", reading_order=2, source_text="مرحبا", source_language="ar"
+            ),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+    bad, good = document.blocks
+
+    assert review_required
+    assert bad.translation_status == TranslationStatus.FAILED
+    assert bad.review_required
+    assert any("protected value" in warning for warning in bad.warnings)
+    assert good.translation_status == TranslationStatus.TRANSLATED
+    assert good.translated_text == "English: مرحبا"
 
 
 class MemoryRepository:
@@ -504,6 +734,50 @@ class MemoryRepository:
         self.job_updates.append(job_values)
         if "status" in document_values:
             self.status = str(document_values["status"])
+
+
+async def test_refresh_source_languages_reflects_post_translation_state() -> None:
+    # _finalize_normalized computes canonical.source_languages once, before any
+    # block is translated. _refresh_source_languages is the post-translation
+    # counterpart - it must read each block/cell's *final* source_language
+    # (post model-detected-language correction), not re-derive from source text.
+    repository = MemoryRepository()
+    service = _service(storage=MemoryStorage(), translator=FakeTranslator(), repository=repository)
+    canonical = CanonicalDocument(
+        document_id="doc-refresh",
+        filename="refresh.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(
+                block_id="b1", reading_order=1, source_text="ignored", source_language="und"
+            ),
+            TextBlock(
+                block_id="b2", reading_order=2, source_text="ignored", source_language="ko-KR"
+            ),
+        ],
+        tables=[
+            TableResult(
+                table_id="t1",
+                row_count=1,
+                column_count=1,
+                cells=[
+                    TableCell(
+                        cell_id="t1-c1",
+                        row_index=0,
+                        column_index=0,
+                        content="x",
+                        source_language="ar",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    await service._refresh_source_languages("doc-refresh", "job-1", canonical)
+
+    assert canonical.source_languages == ["ar", "ko-KR", "und"]
+    assert repository.document_updates[-1]["source_languages"] == ["ar", "ko-KR", "und"]
 
 
 class FakeAnalyzer:
@@ -794,6 +1068,7 @@ class ConcurrentFakeTranslator:
                 TranslationItem(
                     block_id=item.block_id,
                     translated_text="EN: " + item.source_text,
+                    detected_language=item.source_language,
                 )
                 for item in request.blocks
             ]

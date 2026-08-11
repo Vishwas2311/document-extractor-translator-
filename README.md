@@ -269,7 +269,7 @@ The frontend is still started with scripts/start-frontend.ps1. Runtime database 
 2. The original file is stored under storage/documents/<document-id>/source.
 3. Azure Document Intelligence prebuilt-layout returns pages, paragraphs, words, tables, languages, spans, and polygons.
 4. The mapper creates deterministic block IDs and page-aware geometry.
-5. English blocks are retained; blocks with any valid detected non-English BCP 47 language tag are batched for translation. Unknown or unconfident language results fail to review rather than being guessed.
+5. English and non-linguistic (numbers/punctuation-only) blocks are retained as-is; everything else - including a script the local heuristic doesn't recognize - is batched for translation rather than blocked, since GPT-5-mini can detect and translate far more languages than the local heuristic covers. The model also reports back the language it actually detected per block, which corrects the locally-guessed tag. A block only fails to review when the model itself can't identify its language, or when its resolved language falls outside the currently benchmarked set (Arabic, Chinese, English).
 6. GPT-5-mini returns a strict structured response keyed by the original block IDs.
 7. Validation checks exact IDs/order, empty translations, and protected values such as dates, case codes, URLs, email addresses, and numbers.
 8. The backend writes one canonical JSON file per page plus extracted and bilingual exports.

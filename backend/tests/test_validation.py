@@ -91,13 +91,15 @@ def test_rejects_duplicate_ids_replacing_a_missing_one() -> None:
 
 
 def test_rejects_changed_protected_tokens() -> None:
+    # A single block's protected-token drift is reported per-block, not raised for
+    # the whole batch, so the rest of a multi-block batch can still commit.
     inputs = [TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42")]
     response = TranslationBatchResponse(
         translations=[TranslationItem(block_id="b1", translated_text="Case forty-two")]
     )
 
-    with pytest.raises(TranslationValidationError):
-        TranslationValidator().validate(inputs, response)
+    invalid = TranslationValidator().validate(inputs, response)
+    assert "b1" in invalid
 
 
 def test_protected_re_matches_full_pseudonym_token() -> None:
@@ -124,8 +126,8 @@ def test_rejects_truncated_pseudonym_token() -> None:
         ]
     )
 
-    with pytest.raises(TranslationValidationError):
-        TranslationValidator().validate(inputs, response)
+    invalid = TranslationValidator().validate(inputs, response)
+    assert "b1" in invalid
 
 
 def test_rejects_pseudonym_token_with_altered_digest() -> None:
@@ -139,8 +141,8 @@ def test_rejects_pseudonym_token_with_altered_digest() -> None:
         translations=[TranslationItem(block_id="b1", translated_text=text.replace(token, altered))]
     )
 
-    with pytest.raises(TranslationValidationError):
-        TranslationValidator().validate(inputs, response)
+    invalid = TranslationValidator().validate(inputs, response)
+    assert "b1" in invalid
 
 
 def test_pseudonymize_translate_validate_restore_round_trip() -> None:
@@ -167,7 +169,8 @@ def test_pseudonymize_translate_validate_restore_round_trip() -> None:
             )
         ]
     )
-    TranslationValidator().validate(prepared.inputs, response)
+    invalid = TranslationValidator().validate(prepared.inputs, response)
+    assert invalid == {}
     restored = gateway.restore_text(response.translations[0].translated_text, prepared.token_map)
     assert "20261225" in restored
 
@@ -184,5 +187,5 @@ def test_pseudonymize_translate_validate_restore_round_trip() -> None:
             )
         ]
     )
-    with pytest.raises(TranslationValidationError):
-        TranslationValidator().validate(prepared.inputs, garbled_response)
+    invalid = TranslationValidator().validate(prepared.inputs, garbled_response)
+    assert "b1" in invalid

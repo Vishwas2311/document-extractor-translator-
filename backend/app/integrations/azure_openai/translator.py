@@ -2,9 +2,13 @@ from typing import Any, cast
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
+    AuthenticationError,
     InternalServerError,
+    NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
 )
 from tenacity import (
@@ -46,6 +50,17 @@ class AzureOpenAITranslator:
         self._client: AsyncOpenAI | None = None
 
     def _get_client(self) -> AsyncOpenAI:
+        if self.settings.azure_auth_mode == "managed_identity":
+            # `azure_openai_configured` (config.py) treats managed_identity as valid
+            # with no api_key required, but there is no managed-identity/AAD token
+            # credential wiring here - only the api_key path below is implemented.
+            # Fail with an explicit, honest error instead of falling through to the
+            # generic "not configured" message below (which would be misleading -
+            # the settings *are* present, this mode just isn't built yet).
+            raise ConfigurationError(
+                "Azure OpenAI auth_mode 'managed_identity' is not implemented. "
+                "Set AZURE_AUTH_MODE=api_key and provide AZURE_OPENAI_API_KEY instead."
+            )
         base_url = self.settings.azure_openai_base_url
         api_key = self.settings.azure_openai_api_key
         if not base_url or not api_key or not self.settings.azure_openai_deployment:
@@ -120,6 +135,73 @@ class AzureOpenAITranslator:
                 details={"service": "azure_openai"},
             ) from exc
         raise AzureServiceError("Azure OpenAI translation failed.")
+
+    async def check_connectivity(self) -> dict[str, Any]:
+        """Make one minimal, real call to Azure OpenAI to verify networking,
+        authentication, and deployment access - the diagnostic a live 403/network
+        error otherwise requires guessing at. Never sends or returns document
+        content: the probe message is a fixed, trivial string, and only a safe
+        status/category is reported back, never the raw exception or response body."""
+        try:
+            client = self._get_client()
+        except ConfigurationError as exc:
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error_category": "not_configured",
+                "detail": exc.message,
+            }
+        deployment = self.settings.azure_openai_deployment
+        try:
+            await client.chat.completions.create(
+                model=cast(str, deployment),
+                messages=[{"role": "user", "content": "ping"}],
+                max_completion_tokens=1,
+                reasoning_effort=cast(Any, self.settings.azure_openai_reasoning_effort),
+            )
+        except (AuthenticationError, PermissionDeniedError) as exc:
+            return {
+                "reachable": False,
+                "http_status": exc.status_code,
+                "error_category": "auth",
+                "detail": "Azure rejected the request's credentials or permissions.",
+            }
+        except RateLimitError as exc:
+            return {
+                "reachable": False,
+                "http_status": exc.status_code,
+                "error_category": "rate_limited",
+                "detail": "Azure OpenAI is rate-limiting this deployment.",
+            }
+        except NotFoundError as exc:
+            return {
+                "reachable": False,
+                "http_status": exc.status_code,
+                "error_category": "not_found",
+                "detail": "The configured deployment was not found at this endpoint.",
+            }
+        except (APIConnectionError, APITimeoutError):
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error_category": "network",
+                "detail": "Could not reach the configured Azure OpenAI endpoint.",
+            }
+        except APIStatusError as exc:
+            return {
+                "reachable": False,
+                "http_status": exc.status_code,
+                "error_category": "unknown",
+                "detail": "Azure OpenAI returned an unexpected error.",
+            }
+        except Exception:
+            return {
+                "reachable": False,
+                "http_status": None,
+                "error_category": "unknown",
+                "detail": "An unexpected error occurred while contacting Azure OpenAI.",
+            }
+        return {"reachable": True, "http_status": 200, "error_category": None, "detail": None}
 
     async def close(self) -> None:
         if self._client is not None:

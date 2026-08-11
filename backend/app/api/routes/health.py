@@ -108,6 +108,22 @@ async def dependency_configuration(
     }
 
 
+@router.get("/health/dependencies/azure-openai/live")
+async def azure_openai_live_check(
+    request: Request,
+    _: Annotated[AuthPrincipal, Depends(require_principal)],
+) -> JSONResponse:
+    """Make one real, minimal call to Azure OpenAI and report back whether it
+    succeeded and why not if it didn't - unlike /health/dependencies (which only
+    reports whether credentials are *present*), this actually exercises the
+    network path, auth, and configured deployment. Never returns document
+    content or the raw provider error, only a safe status/category."""
+    translator = request.app.state.container.translator
+    result = await translator.check_connectivity()
+    status_code = 200 if result["reachable"] else 503
+    return JSONResponse(result, status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/health/session")
 async def session_status(
     request: Request,

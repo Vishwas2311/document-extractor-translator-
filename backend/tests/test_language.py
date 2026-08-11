@@ -8,8 +8,25 @@ from app.services.language import LanguageService
     [
         ("مرحبا بكم", None, "ar"),
         ("青年支持计划", None, "zh-Hans"),
+        # No DI hint and no script this heuristic recognizes as a known bucket
+        # (Latin-only, Cyrillic, Hangul, ...) all fall to "und" - should_translate()
+        # (tested below) still routes these to the translation model instead of
+        # blocking them, so a script the local heuristic has never seen still gets
+        # translated correctly rather than stalling forever.
         ("Youth support", None, "und"),
         ("Youth support", "en-US", "en"),
+        ("2024-01-15", None, "zxx"),
+        # A hint attached to non-linguistic content must never override "zxx" - it's
+        # checked before any hint is consulted at all.
+        ("2024-01-15", "zh-Hans", "zxx"),
+        ("---", "ar-SA", "zxx"),
+        ("Привет", None, "und"),
+        ("안녕하세요", None, "und"),
+        # An "en" hint that contradicts the actual script (no Latin letters at all)
+        # isn't trustworthy - treated as uncertain ("und") rather than silently
+        # skipping translation on a bad hint.
+        ("Привет", "en-US", "und"),
+        ("안녕하세요", "en", "und"),
         ("Case 12: مرحبا", None, "mixed"),
         ("content", "ar-SA", "ar"),
         ("content", "zh-Hans", "zh-Hans"),
@@ -46,9 +63,21 @@ def test_any_valid_detected_non_english_language_is_translated(language: str) ->
     assert LanguageService.should_translate(language)
 
 
-@pytest.mark.parametrize("language", ["en", "en-US", "und", "zxx", "invalid language"])
-def test_non_translatable_or_unknown_language_is_not_routed(language: str) -> None:
+@pytest.mark.parametrize("language", ["en", "en-US", "zxx"])
+def test_confidently_english_or_non_linguistic_content_is_not_routed(language: str) -> None:
     assert not LanguageService.should_translate(language)
+
+
+@pytest.mark.parametrize("language", ["und", "invalid language", "ko-KR", "th-TH", ""])
+def test_unrecognized_or_unhinted_language_is_still_routed_for_translation(
+    language: str,
+) -> None:
+    # "und" (a script the local heuristic doesn't recognize), a malformed hint, or a
+    # locale we've simply never special-cased must all still reach the translation
+    # model rather than being silently blocked - only "en" and "zxx" are skipped
+    # locally. This is what lets a brand-new language work correctly without any
+    # code change here.
+    assert LanguageService.should_translate(language)
 
 
 @pytest.mark.parametrize(
@@ -65,3 +94,15 @@ def test_non_translatable_or_unknown_language_is_not_routed(language: str) -> No
 )
 def test_has_letters_identifies_non_linguistic_content(text: str, expected: bool) -> None:
     assert LanguageService.has_letters(text) is expected
+
+
+@pytest.mark.parametrize("language", ["ar", "zh-Hans", "zh-Hant", "en", "en-US", "AR"])
+def test_is_benchmarked_accepts_validated_languages(language: str) -> None:
+    assert LanguageService.is_benchmarked(language)
+
+
+@pytest.mark.parametrize("language", ["fr-FR", "ru-RU", "ko-KR", "und", "zxx", "hi"])
+def test_is_benchmarked_flags_everything_else(language: str) -> None:
+    # Flag-only signal: is_benchmarked() being False doesn't block translation (see
+    # should_translate) - it only marks the result for review.
+    assert not LanguageService.is_benchmarked(language)

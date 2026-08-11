@@ -507,25 +507,32 @@ class ProcessingService:
         input_hash: str,
         request: TranslationBatchRequest,
         inputs: list[TranslationInput],
-    ) -> TranslationBatchResponse:
+    ) -> tuple[TranslationBatchResponse, dict[str, str]]:
         if self.storage.exists(document_id, artifact):
             cached = await self.storage.read_json(document_id, artifact)
             if cached.get("input_hash") == input_hash:
                 response = TranslationBatchResponse.model_validate(cached["response"])
-                self.validator.validate(inputs, response)
-                return response
+                invalid = self.validator.validate(inputs, response)
+                if not invalid:
+                    return response, invalid
+                # The cached response has per-item validation failures (e.g. a
+                # mangled protected token). Don't keep serving the same bad result
+                # on every resume retry (RetryMode.RESUME doesn't clear this cache,
+                # only RETRANSLATE does, and that nukes every batch, not just this
+                # one) - fall through and ask the model again instead.
         response = await self.translator.translate(request)
-        self.validator.validate(inputs, response)
-        await self.storage.write_json(
-            document_id,
-            artifact,
-            {
-                "input_hash": input_hash,
-                "prompt_version": TRANSLATION_PROMPT_VERSION,
-                "response": response.model_dump(mode="json"),
-            },
-        )
-        return response
+        invalid = self.validator.validate(inputs, response)
+        if not invalid:
+            await self.storage.write_json(
+                document_id,
+                artifact,
+                {
+                    "input_hash": input_hash,
+                    "prompt_version": TRANSLATION_PROMPT_VERSION,
+                    "response": response.model_dump(mode="json"),
+                },
+            )
+        return response, invalid
 
     async def _translate(
         self,
@@ -585,6 +592,10 @@ class ProcessingService:
                 block.translated_text = block.source_text
                 block.translation_status = TranslationStatus.NOT_REQUIRED
             else:
+                # Defense in depth: should_translate() now only returns False for
+                # "en" and "zxx" (both handled above), so this branch shouldn't be
+                # reachable - kept as a fail-closed fallback in case that contract
+                # ever changes.
                 block.translation_status = TranslationStatus.NEEDS_REVIEW
                 block.review_required = True
                 block.warnings.append("Language could not be confidently routed.")
@@ -671,7 +682,7 @@ class ProcessingService:
             batch_failed = False
             async with semaphore:
                 try:
-                    response = await self._resolve_batch_translation(
+                    response, invalid_reasons = await self._resolve_batch_translation(
                         document.document_id,
                         artifact,
                         input_hash,
@@ -703,16 +714,33 @@ class ProcessingService:
                             item.translated_text, prepared.token_map
                         )
                         for item in response.translations
+                        if item.block_id not in invalid_reasons
                     }
+                    # The model detects the real language from the text itself, which
+                    # is more reliable than the local script/hint heuristic that fed it
+                    # (especially for "und" - a script the heuristic doesn't recognize
+                    # at all) - prefer it for the language shown to reviewers.
+                    detected_language_by_id: dict[str, str] = {}
+                    for item in response.translations:
+                        if item.block_id in invalid_reasons:
+                            continue
+                        detected = LanguageService.normalize_detected_language(
+                            item.detected_language
+                        )
+                        if detected is not None:
+                            detected_language_by_id[item.block_id] = detected
                     missing_block_ids = [
                         block.block_id for block in blocks if block.block_id not in translated_by_id
                     ]
                     if missing_block_ids:
-                        # The model's structured-output response omitted one or more
-                        # requested blocks - a malformed-but-200 response, not caught by
-                        # the AzureServiceError/TranslationValidationError path above.
-                        # Flag only the affected block(s) for review rather than failing
-                        # every block in the batch (the others translated successfully).
+                        # Blocks land here either because the model's structured-output
+                        # response omitted them (a malformed-but-200 response, not caught
+                        # by the AzureServiceError/TranslationValidationError path above)
+                        # or because the validator rejected their specific translation
+                        # (empty output, or a changed protected number/code/identifier -
+                        # see invalid_reasons). Either way, flag only the affected
+                        # block(s) for review rather than failing every block in the
+                        # batch - the rest translated successfully.
                         await logger.awarning(
                             "translation_batch_missing_block_ids",
                             document_id=document.document_id,
@@ -724,16 +752,37 @@ class ProcessingService:
                         if block.block_id in translated_by_id:
                             block.translated_text = translated_by_id[block.block_id]
                             block.translation_status = TranslationStatus.TRANSLATED
+                            if block.block_id in detected_language_by_id:
+                                block.source_language = detected_language_by_id[block.block_id]
+                                if not LanguageService.is_benchmarked(block.source_language):
+                                    block.review_required = True
+                                    block.warnings.append(
+                                        "Language outside the currently benchmarked set "
+                                        "(Arabic, Chinese, English); verify translation quality."
+                                    )
+                                    review_required = True
+                            else:
+                                # The model couldn't identify the language either - this
+                                # block looks "done" but nobody, human or model, has
+                                # confirmed what was actually translated. Worth a look.
+                                block.review_required = True
+                                block.warnings.append(
+                                    "Translated, but the source language could not be "
+                                    "confirmed - please verify."
+                                )
+                                review_required = True
                         else:
                             block.translation_status = TranslationStatus.FAILED
                             block.review_required = True
                             block.warnings.append(
-                                "Translation response did not include this block; "
+                                invalid_reasons.get(block.block_id)
+                                or "Translation response did not include this block; "
                                 "needs manual review."
                             )
                         for follower in followers.get(block.block_id, []):
                             follower.translated_text = block.translated_text
                             follower.translation_status = block.translation_status
+                            follower.source_language = block.source_language
                             follower.review_required = block.review_required
                             follower.warnings = list(block.warnings)
 
@@ -1174,6 +1223,29 @@ class ProcessingService:
         )
         return canonical, page_numbers
 
+    async def _refresh_source_languages(
+        self, document_id: str, job_id: str, canonical: CanonicalDocument
+    ) -> None:
+        """Recompute the document-level language summary from each block/cell's
+        final, post-translation source_language, so it reflects the model's own
+        detection (see run_batch's detected_language handling) rather than staying
+        stuck on the pre-translation local-heuristic guess _finalize_normalized
+        computed before any block had actually been translated."""
+        canonical.source_languages = sorted(
+            {block.source_language for block in canonical.blocks}
+            | {
+                cell.source_language
+                for table in canonical.tables
+                for cell in table.cells
+                if cell.content.strip()
+            }
+        )
+        await self.repository.update_active_document(
+            document_id,
+            job_id=job_id,
+            source_languages=canonical.source_languages,
+        )
+
     async def _finish_safe(
         self,
         document_id: str,
@@ -1338,6 +1410,11 @@ class ProcessingService:
                 on_batch_progress=on_batch_progress,
                 on_batch_complete=on_batch_complete,
             )
+            # translation_document is either canonical itself, or a shallow
+            # model_copy() over the same block/cell references (see
+            # _translation_view) - either way _translate() just mutated the same
+            # objects canonical.blocks/tables point to.
+            await self._refresh_source_languages(document_id, job.id, canonical)
             financial_result: FinancialResult | None = None
             financial_result_hash: str | None = None
             if classification is not None:

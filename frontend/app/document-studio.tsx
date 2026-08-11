@@ -51,6 +51,7 @@ import type {
   TableResult,
   TextBlock,
   TranslationReviewRecord,
+  TranslationStatus,
 } from "./types";
 
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
@@ -448,6 +449,7 @@ function displayLanguage(language: string) {
     "zh-Hant": "Traditional Chinese",
     mixed: "Mixed languages",
     en: "English",
+    "en-x-unconfirmed": "English (unconfirmed)",
     und: "Unknown language",
     zxx: "No linguistic content",
   };
@@ -456,6 +458,24 @@ function displayLanguage(language: string) {
     return new Intl.DisplayNames(["en"], { type: "language" }).of(language) ?? language;
   } catch {
     return language;
+  }
+}
+
+function translationStatusCopy(status: TranslationStatus, warnings?: string[] | null): string {
+  const reason = warnings && warnings.length ? warnings[warnings.length - 1] : undefined;
+  switch (status) {
+    case "not_required":
+      return "No translatable text in this region.";
+    case "pending":
+      return "Translation is queued and has not run yet.";
+    case "failed":
+      return reason ? `Translation failed: ${reason}` : "Translation failed. Use Retry to try again.";
+    case "filtered":
+      return "Translation was filtered by the safety system and needs manual review.";
+    case "needs_review":
+      return reason ?? "This region needs manual review before it can be translated.";
+    default:
+      return "Translation pending.";
   }
 }
 
@@ -679,7 +699,7 @@ function RegionTooltip({
         <span className="region-tooltip-language">{displayLanguage(block.source_language)}</span>
       </div>
       <p className={translation ? "region-tooltip-translation" : "region-tooltip-pending"}>
-        {translation || "Translation pending — configure Azure OpenAI to generate the English text."}
+        {translation || translationStatusCopy(block.translation_status, block.warnings)}
       </p>
       <div className="region-tooltip-divider" />
       <span className="region-tooltip-label">Original</span>
@@ -764,7 +784,7 @@ function TableCellTooltip({
         </span>
       </div>
       <p className={translation ? "region-tooltip-translation" : "region-tooltip-pending"}>
-        {translation || "Translation pending — configure Azure OpenAI to generate the English text."}
+        {translation || translationStatusCopy(cell.translation_status, cell.warnings)}
       </p>
       <div className="region-tooltip-divider" />
       <span className="region-tooltip-label">Original</span>
@@ -2273,13 +2293,22 @@ export function DocumentStudio() {
     }
   }
 
-  const sourceLanguages = page
-    ? Array.from(new Set([
-        ...standaloneBlocks.map((block) => displayLanguage(block.source_language)),
-        ...page.tables.flatMap((table) =>
-          table.cells.map((cell) => displayLanguage(cell.source_language)),
-        ),
-      ]))
+  // Per-language region counts for the current page, not a translation pipeline -
+  // shown as separate chips (see Route render below) so one mistagged region
+  // doesn't read as a long, alarming chain of unrelated languages.
+  const sourceLanguageCounts = page
+    ? Array.from(
+        [
+          ...standaloneBlocks.map((block) => block.source_language),
+          ...page.tables.flatMap((table) => table.cells.map((cell) => cell.source_language)),
+        ]
+          .reduce((counts, language) => {
+            const label = displayLanguage(language);
+            counts.set(label, (counts.get(label) ?? 0) + 1);
+            return counts;
+          }, new Map<string, number>())
+          .entries(),
+      )
     : [];
 
   useEffect(() => {
@@ -3400,7 +3429,8 @@ export function DocumentStudio() {
                                 >
                                   <span>
                                     {contentLanguageView === "english"
-                                      ? cell.translated_content || "Translation pending"
+                                      ? cell.translated_content ||
+                                        translationStatusCopy(cell.translation_status, cell.warnings)
                                       : cell.content}
                                   </span>
                                   {contentLanguageView === "english" ? (
@@ -3463,7 +3493,10 @@ export function DocumentStudio() {
                         </span>
                         {contentLanguageView === "english" ? (
                           <>
-                            <span className="translation-text">{block.translated_text || "Translation pending"}</span>
+                            <span className="translation-text">
+                              {block.translated_text ||
+                                translationStatusCopy(block.translation_status, block.warnings)}
+                            </span>
                             <span className="source-preview" dir="auto">{block.source_text}</span>
                             {block.review_required ? (
                               <label
@@ -3563,8 +3596,18 @@ export function DocumentStudio() {
               </span>
             </div>
             <div className="language-summary">
-              <span className="language-summary-label">Route</span>
-              <strong className="language-token">{sourceLanguages.join(" + ") || "—"}</strong>
+              <span className="language-summary-label">Source languages</span>
+              <span style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {sourceLanguageCounts.length ? (
+                  sourceLanguageCounts.map(([label, count]) => (
+                    <strong className="language-token" key={label}>
+                      {label} · {count}
+                    </strong>
+                  ))
+                ) : (
+                  <strong className="language-token">—</strong>
+                )}
+              </span>
               <span className="language-arrow"><Icon name="arrowRight" /></span>
               <strong className="language-token is-target">English</strong>
             </div>

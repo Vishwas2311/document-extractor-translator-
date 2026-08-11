@@ -21,7 +21,14 @@ class TranslationValidator:
         self,
         inputs: list[TranslationInput],
         response: TranslationBatchResponse,
-    ) -> None:
+    ) -> dict[str, str]:
+        """Validate a batch response. Structural problems that make the response as a
+        whole unusable for id-based lookup (missing/extra/duplicate ids) still raise -
+        the batch can't be safely attributed at all. Per-item problems (empty
+        translation, a protected token that changed) instead return a
+        {block_id: reason} map so the caller can fail only those specific blocks and
+        still commit the rest of the batch, which one bad numeric/acronym token
+        shouldn't hold hostage."""
         expected_ids = [item.block_id for item in inputs]
         actual_ids = [item.block_id for item in response.translations]
         if sorted(actual_ids) != sorted(expected_ids):
@@ -36,13 +43,16 @@ class TranslationValidator:
         if len(set(actual_ids)) != len(actual_ids):
             raise TranslationValidationError("Translation response contained duplicate IDs.")
         source_by_id = {item.block_id: item.source_text for item in inputs}
+        invalid: dict[str, str] = {}
         for item in response.translations:
             if source_by_id[item.block_id].strip() and not item.translated_text.strip():
-                raise TranslationValidationError(f"Translation for {item.block_id} was empty.")
+                invalid[item.block_id] = "Translation was empty; needs manual review."
+                continue
             source_tokens = PROTECTED_RE.findall(source_by_id[item.block_id])
             missing = [token for token in source_tokens if token not in item.translated_text]
             if missing:
-                raise TranslationValidationError(
-                    f"Translation for {item.block_id} changed protected tokens.",
-                    details={"block_id": item.block_id, "missing_tokens": missing[:10]},
+                invalid[item.block_id] = (
+                    "Translation changed a protected value (a number, code, or "
+                    "identifier); needs manual review."
                 )
+        return invalid
