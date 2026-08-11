@@ -128,31 +128,47 @@ class FakeTranslator:
 
 
 class TogglingTranslator:
-    """Mangles the protected token on the first call; translates it faithfully
-    (correctly) on every call after."""
+    """Mangles the protected token in block 'b1' on the first call only;
+    translates faithfully after that. Records the block_ids of every request it
+    receives, so tests can confirm a retry targets only the block(s) that failed
+    validation - not the whole batch (Cursor Bugbot caught a regression here: an
+    earlier version of this fix re-sent the entire batch on retry, risking drift
+    in already-good translations and wasting API calls)."""
 
     def __init__(self) -> None:
         self.calls = 0
+        self.received_block_ids: list[list[str]] = []
 
     async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
         self.calls += 1
-        translated = "Case forty-two" if self.calls == 1 else "CASE-42 confirmed"
+        self.received_block_ids.append([item.block_id for item in request.blocks])
         return TranslationBatchResponse(
             translations=[
-                TranslationItem(block_id=item.block_id, translated_text=translated)
+                TranslationItem(
+                    block_id=item.block_id,
+                    translated_text=(
+                        "Case forty-two"
+                        if item.block_id == "b1" and self.calls == 1
+                        else "English: " + item.source_text
+                    ),
+                )
                 for item in request.blocks
             ]
         )
 
 
-async def test_invalid_batch_response_is_not_cached_and_retry_calls_live() -> None:
-    # A batch with a per-item validation failure must not be persisted - a resume
-    # retry (which doesn't clear this cache) would otherwise just replay the same
-    # bad translation forever instead of ever asking the model again.
+async def test_invalid_batch_response_is_cached_and_retry_targets_only_the_bad_block() -> None:
+    # A batch with one invalid block among several must still be cached (the
+    # other, valid translations must not be thrown away and re-requested later),
+    # and a retry must ask the model for only the block that actually failed
+    # validation, not the whole batch.
     storage = MemoryStorage()
     translator = TogglingTranslator()
     service = _service(storage=storage, translator=translator)
-    inputs = [TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42")]
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42"),
+        TranslationInput(block_id="b2", source_language="ar", source_text="مرحبا"),
+    ]
     request = TranslationBatchRequest(blocks=inputs)
     artifact = "translations/batch-0001.json"
     document_id = "doc-cache-test"
@@ -161,18 +177,21 @@ async def test_invalid_batch_response_is_not_cached_and_retry_calls_live() -> No
         document_id, artifact, "hash-1", request, inputs
     )
     assert "b1" in invalid
-    assert not storage.exists(document_id, artifact)
-    assert translator.calls == 1
+    assert "b2" not in invalid
+    assert translator.received_block_ids == [["b1", "b2"]]
+    # Cached even though b1 is invalid - b2's good translation must be preserved.
+    assert storage.exists(document_id, artifact)
 
-    # Requesting the same batch again (e.g. a resume retry) must call the
-    # translator live again, not be satisfied by a (nonexistent) stale cache.
     response, invalid = await service._resolve_batch_translation(
         document_id, artifact, "hash-1", request, inputs
     )
     assert invalid == {}
-    assert response.translations[0].translated_text == "CASE-42 confirmed"
-    assert translator.calls == 2
-    assert storage.exists(document_id, artifact)
+    # Only b1 (the block that failed) was re-requested - not b2.
+    assert translator.received_block_ids == [["b1", "b2"], ["b1"]]
+    b1_translation = next(item for item in response.translations if item.block_id == "b1")
+    b2_translation = next(item for item in response.translations if item.block_id == "b2")
+    assert "CASE-42" in b1_translation.translated_text
+    assert b2_translation.translated_text == "English: مرحبا"
 
 
 async def test_resolve_batch_translation_bypasses_a_stale_invalid_cache() -> None:
