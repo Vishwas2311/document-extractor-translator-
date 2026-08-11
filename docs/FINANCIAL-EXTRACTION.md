@@ -70,7 +70,7 @@ Cached classification is accepted only when the classifier ID, declared classifi
 - Table items reference the normalized table by stable `table_id`; cells are never flattened into prose.
 - Source/translated text, source language, page list, geometry, relevance, warnings, and review state remain attached to each item.
 - Items are sorted deterministically by source page, provider span, semantic priority, and stable ID.
-- Table cells carry source and translated text. Any valid detected non-English BCP 47 tag is translation-eligible; unknown language remains review-required.
+- Table cells carry source and translated text. Any non-English, non-linguistic content is translation-eligible - including a script the local heuristic can't identify, which is routed to the translation model rather than blocked. A cell remains review-required only if the model itself can't identify the language it translated, or the resolved language falls outside the currently benchmarked set (Arabic, Chinese, English).
 - The UI renders the ordered stream as a financial document with Source and English views. Normalized values are shown separately and never replace the source value.
 - The frontend can still read stored `financial-result-1.1` table-only artifacts; normalized
   values from a pre-1.4 result are withheld because they lack semantic typing, and the UI asks

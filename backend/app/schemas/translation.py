@@ -15,6 +15,14 @@ class TranslationBatchRequest(BaseModel):
 class TranslationItem(BaseModel):
     block_id: str
     translated_text: str
+    detected_language: str | None = Field(
+        default=None,
+        description=(
+            "BCP 47 tag for the language the model actually detected the source text "
+            "to be in, which may differ from the declared source_language hint. "
+            "'und' or omitted if genuinely undetectable."
+        ),
+    )
 
 
 class TranslationBatchResponse(BaseModel):
