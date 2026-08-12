@@ -14,6 +14,7 @@ import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
   checkHealth,
+  checkHealthDependencies,
   checkSession,
   cancelDocument,
   createFinancialReview,
@@ -43,6 +44,7 @@ import type {
   FinancialContentItem,
   FinancialResult,
   FinancialReviewRecord,
+  HealthDependencies,
   HealthStatus,
   PageResult,
   PageSummary,
@@ -1170,6 +1172,7 @@ export function DocumentStudio() {
   const [info, setInfo] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [healthDependencies, setHealthDependencies] = useState<HealthDependencies | null>(null);
   const [sourceBlobUrl, setSourceBlobUrl] = useState<string | null>(null);
   const [isDocumentListOpen, setIsDocumentListOpen] = useState(false);
   const [documentList, setDocumentList] = useState<DocumentSummary[]>([]);
@@ -1306,6 +1309,9 @@ export function DocumentStudio() {
     checkHealth({ signal: controller.signal })
       .then((result) => setHealth(result))
       .catch(() => undefined);
+    checkHealthDependencies({ signal: controller.signal })
+      .then((result) => setHealthDependencies(result))
+      .catch(() => undefined);
     checkSession({ signal: controller.signal })
       .then((result) => setSession(result))
       .catch(() => undefined);
@@ -1374,9 +1380,9 @@ export function DocumentStudio() {
       ? sourceViewport.height * zoom
       : dimensionToCssPixels(11, "inch", zoom);
 
-  const diConfigured = Boolean(health?.azure_configured.document_intelligence);
+  const diConfigured = Boolean(healthDependencies?.document_intelligence.configured);
   const openaiConfigured = Boolean(
-    health?.azure_configured.openai && (health.openai_deployment_configured ?? true),
+    healthDependencies?.azure_openai.configured && healthDependencies.azure_openai.deployment,
   );
 
   const handleSourceReady = useCallback((width: number, height: number) => {
@@ -2527,16 +2533,14 @@ export function DocumentStudio() {
         style={inspectorWidth !== null ? { gridTemplateColumns: `minmax(0, 1fr) 6px ${inspectorWidth}px` } : undefined}
       >
       <div className="studio-main-column">
-      {!document.demo && health && (!health.azure_configured.document_intelligence || !health.azure_configured.openai) ? (
+      {!document.demo && healthDependencies && (!diConfigured || !openaiConfigured) ? (
         <div className="notice-bar" role="status">
           <span className="notice-icon">!</span>
           <span className="notice-copy">
             <strong>Service not fully configured</strong>
             <span>
-              {!health.azure_configured.document_intelligence
-                ? "Document extraction is not configured. "
-                : ""}
-              {!health.azure_configured.openai
+              {!diConfigured ? "Document extraction is not configured. " : ""}
+              {!openaiConfigured
                 ? "Translation is not configured - documents will extract but fail at the translation step."
                 : ""}
             </span>

@@ -55,8 +55,15 @@ async def readiness(request: Request) -> JSONResponse:
         "database": database_status,
         "storage": storage_status,
         "worker": worker_status,
-        # Keep unauthenticated readiness operational and content-free. Detailed
-        # configuration remains on the authenticated dependency endpoint.
+        # Operating limits, not secrets - already published in .env.example - and
+        # the client needs them for correct upload-size and poll-timeout behavior.
+        # Whether Azure is configured, auth mode, and other policy detail stay off
+        # this unauthenticated endpoint; that lives on /health/dependencies.
+        "limits": {
+            "max_upload_size_mb": settings.max_upload_size_mb,
+            "max_document_pages": settings.max_document_pages,
+            "job_poll_timeout_minutes": 90,
+        },
     }
     status_code = 200 if overall == "ready" else 503
     return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})

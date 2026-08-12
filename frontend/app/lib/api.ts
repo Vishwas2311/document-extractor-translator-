@@ -2,6 +2,7 @@ import type {
   DocumentCreateResponse,
   DocumentDetail,
   DocumentListResponse,
+  HealthDependencies,
   HealthStatus,
   FinancialCorrection,
   FinancialReviewHistory,
@@ -20,6 +21,7 @@ import {
   isDocumentCreateResponse,
   isDocumentDetail,
   isDocumentListResponse,
+  isHealthDependencies,
   isHealthStatus,
   isFinancialResult,
   isFinancialReviewHistory,
@@ -452,6 +454,23 @@ export function deleteDocument(documentId: string, options?: RequestOptions): Pr
 
 export function checkHealth(options?: RequestOptions): Promise<HealthStatus> {
   return apiFetch("/health/ready", isHealthStatus, "health status", undefined, options);
+}
+
+/**
+ * Service-configuration flags (Document Intelligence / Azure OpenAI configured or
+ * not). Deliberately separate from checkHealth(): /health/ready is unauthenticated
+ * and content-free by design, so this detail lives behind auth on /health/dependencies.
+ */
+export function checkHealthDependencies(
+  options?: RequestOptions,
+): Promise<HealthDependencies> {
+  return apiFetch(
+    "/health/dependencies",
+    isHealthDependencies,
+    "health dependencies",
+    undefined,
+    options,
+  );
 }
 
 export function checkSession(options?: RequestOptions): Promise<SessionStatus> {
