@@ -2417,6 +2417,7 @@ export function DocumentStudio() {
     >
       <input
         accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp"
+        aria-label="Upload document"
         className="visually-hidden"
         onChange={handleFileInput}
         ref={inputRef}
