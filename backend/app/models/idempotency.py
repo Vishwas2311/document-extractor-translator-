@@ -24,7 +24,9 @@ class IdempotencyRecord(Base):
     __table_args__ = (UniqueConstraint("scope", name="uq_idempotency_scope"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    # scope = "{organization_id}:{actor_subject}:{operation}:{key}"
+    # scope = sha256(organization_id, actor_subject, operation, key) - see
+    # app.core.idempotency.idempotency_scope for why it's hashed rather than
+    # delimited-concatenated.
     scope: Mapped[str] = mapped_column(String(512), index=True)
     request_hash: Mapped[str] = mapped_column(String(64))
     # 0 marks a reservation that is still in flight; a real HTTP status marks a
