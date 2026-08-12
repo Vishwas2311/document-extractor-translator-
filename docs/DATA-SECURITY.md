@@ -480,6 +480,22 @@ scanning, WORM-grade audit evidence, retention automation, durable provider-dele
 receipts/retry/alerting, classifier-result deletion support, private networking, managed-identity
 deployment evidence, and formal security evidence.
 
+Three specific consequences of the missing Entra ID federation, stated explicitly so they are not
+mistaken for defects on a future review:
+
+- The browser never holds or sends its own backend credential. The Next.js server-side proxy
+  (`frontend/app/api/backend/[...path]/route.ts`) attaches one shared, operator-configured
+  `API_AUTH_TOKEN` to every request it forwards. Every user of the current UI therefore acts as
+  the same backend principal. Real per-user identity requires the Entra ID federation named above;
+  it is not a bug to fix independently of that work.
+- An API token not present in `API_AUTH_PRINCIPALS` defaults to the `org_admin` role in
+  `org-local` (see `backend/.env.example`) - a local-single-operator convenience so an
+  unconfigured evaluator token still works, not a production default.
+- A principal with the reviewer role may open any document in their organization whose status is
+  `draft`, `needs_review`, or `in_review`, not only documents assigned to them
+  (`app/core/authorization.py::can_access_document`). This is a pull-queue model, intentional for
+  local/eval use; revisit before production if a stricter assignment-only model is required.
+
 ## 4. Security meanings that must not be confused
 
 1. **Statement:** Provider does not train on customer data

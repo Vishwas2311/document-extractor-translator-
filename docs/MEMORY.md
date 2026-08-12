@@ -364,6 +364,13 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
     not implemented.
 16. Azure AI Translator and connected/disconnected Document Intelligence/Translator container routes are not implemented.
 17. Managed identity enforcement, private endpoints, outbound egress allowlisting, allowed-region/deployment policy, and modified-abuse-monitoring verification are not implemented.
+18. The BFF proxy uses one shared backend token for every UI user, unmapped local tokens default
+    to `org_admin`, and any reviewer may open any unassigned in-review document in their org - all
+    intentional consequences of not yet having Entra ID federation, detailed in
+    [DATA-SECURITY.md §3](./DATA-SECURITY.md). A document's `financial_result_sha256`/
+    `translation_result_sha256` is null until its first review save, so the UI's optimistic-
+    concurrency `If-Match` header is only sent from the second review onward; this only matters
+    once `APP_ENV=production` (inert today, since that mode requires `If-Match`).
 
 ## 13. Quality baseline from the 2026-08-12 review
 
