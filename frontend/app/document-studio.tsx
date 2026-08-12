@@ -2186,12 +2186,16 @@ export function DocumentStudio() {
     setFinancialReviewSubmitting(true);
     setActionError(null);
     try {
-      const persisted = await createFinancialReview(document.id, {
-        decision,
-        note: financialReviewNote.trim() || null,
-        corrections,
-        structure_decisions: structureDecisions,
-      });
+      const persisted = await createFinancialReview(
+        document.id,
+        {
+          decision,
+          note: financialReviewNote.trim() || null,
+          corrections,
+          structure_decisions: structureDecisions,
+        },
+        document.financial_result_sha256,
+      );
       setFinancialReviews((current) => [persisted, ...current]);
       // Minimal optimistic update so the decision is visible immediately; the
       // authoritative document status is re-fetched from the server below.
@@ -2341,11 +2345,15 @@ export function DocumentStudio() {
         );
       }
 
-      const persisted = await createTranslationReview(document.id, {
-        decision,
-        note: translationReviewNote.trim() || null,
-        corrections,
-      });
+      const persisted = await createTranslationReview(
+        document.id,
+        {
+          decision,
+          note: translationReviewNote.trim() || null,
+          corrections,
+        },
+        document.translation_result_sha256,
+      );
       setTranslationReviews((current) => [persisted, ...current]);
       // Minimal optimistic update so the decision is visible immediately; the
       // authoritative document status is re-fetched from the server below.

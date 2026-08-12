@@ -372,6 +372,12 @@ export function createFinancialReview(
     corrections: FinancialCorrection[];
     structure_decisions: FinancialStructureDecision[];
   },
+  // Optimistic-concurrency guard: the server rejects a stale save (the result
+  // changed underneath the reviewer) with 409 instead of silently overwriting
+  // it. `null`/absent (e.g. a document's first-ever review, before a hash has
+  // ever been persisted) skips the header - the server only requires it when
+  // APP_ENV=production, which this local build never sets.
+  ifMatch?: string | null,
   options?: RequestOptions,
 ): Promise<FinancialReviewRecord> {
   return apiFetch(
@@ -380,7 +386,10 @@ export function createFinancialReview(
     "financial review decision",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(ifMatch ? { "If-Match": `"${ifMatch}"` } : {}),
+      },
       body: JSON.stringify(review),
     },
     options,
@@ -407,6 +416,9 @@ export function createTranslationReview(
     note?: string | null;
     corrections: TranslationCorrection[];
   },
+  // See createFinancialReview's ifMatch comment - same optimistic-concurrency
+  // contract, same reason `null`/absent is safe to send.
+  ifMatch?: string | null,
   options?: RequestOptions,
 ): Promise<TranslationReviewRecord> {
   return apiFetch(
@@ -415,7 +427,10 @@ export function createTranslationReview(
     "translation review decision",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(ifMatch ? { "If-Match": `"${ifMatch}"` } : {}),
+      },
       body: JSON.stringify(review),
     },
     options,

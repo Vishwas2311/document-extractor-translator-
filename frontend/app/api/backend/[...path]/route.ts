@@ -4,6 +4,8 @@ const DEFAULT_LOCAL_BACKEND = "http://127.0.0.1:8000/api/v1";
 const FORWARDED_REQUEST_HEADERS = new Set([
   "accept",
   "content-type",
+  "idempotency-key",
+  "if-match",
   "if-none-match",
   "x-request-id",
 ]);

@@ -8,8 +8,18 @@ import type { NextRequest } from "next/server";
 // inline script and the app never hydrates (buttons and tabs stop working).
 // Mirrors the documented Next.js pattern:
 // https://nextjs.org/docs/app/guides/content-security-policy
+function generateNonce(): string {
+  // CSP3's nonce-source grammar is base64-value, not an arbitrary token - a raw
+  // UUID (hyphenated) falls outside it. Browsers match the nonce as an opaque
+  // string either way, but base64 keeps this spec-conformant instead of merely
+  // working by browser leniency. btoa/crypto.getRandomValues are both available
+  // as globals in the Cloudflare Worker runtime and in Node, no Buffer needed.
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...bytes));
+}
+
 export function proxy(request: NextRequest) {
-  const nonce = crypto.randomUUID();
+  const nonce = generateNonce();
   const cspHeader = [
     "default-src 'self'",
     `script-src 'self' 'wasm-unsafe-eval' 'nonce-${nonce}'`,
