@@ -164,8 +164,22 @@ async def upload_document(
     if supports_idempotency:
         assert idem_key is not None
         scope = idempotency_scope(principal, "document.upload", idem_key)
+        # Fingerprint must cover the actual file bytes, not just its metadata:
+        # a replay of the same key with a genuinely different file (e.g. a
+        # corrected version with the same filename/content-type) must be
+        # rejected as "different request", not silently return the first
+        # upload's cached response. Read-then-seek(0) so create_upload's own
+        # streaming read below still sees the file from the start.
+        content_digest = hashlib.sha256()
+        while chunk := await file.read(1024 * 1024):
+            content_digest.update(chunk)
+        await file.seek(0)
         fingerprint = request_fingerprint(
-            file.filename, file.content_type, data_class, processing_profile
+            file.filename,
+            file.content_type,
+            data_class,
+            processing_profile,
+            content_digest.hexdigest(),
         )
         owns, record = await services.repository.reserve_idempotency(scope, fingerprint)
         if not owns:
