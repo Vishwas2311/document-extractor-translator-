@@ -26,7 +26,15 @@ export function proxy(request: NextRequest) {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    "connect-src 'self'",
+    // blob: - PDF.js re-fetches the document over the network from the blob:
+    // URL created for it (pdf-page.tsx's acquirePdfDocument), it doesn't just
+    // read the Blob object directly. Without blob: here that fetch is blocked
+    // outright (no HTTP response at all), which surfaces as a confusing
+    // "Unexpected server response (0)" in the preview UI. Only same-tab,
+    // self-created blob: URLs are ever fetchable - this doesn't open a route
+    // to any externally-supplied URL, and mirrors the blob: already trusted by
+    // img-src (image-document previews) and worker-src (the PDF.js worker) below.
+    "connect-src 'self' blob:",
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'none'",
