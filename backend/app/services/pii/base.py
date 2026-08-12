@@ -32,19 +32,28 @@ class PiiDetector(Protocol):
 
 
 def dedupe_overlaps(spans: Sequence[PiiSpan]) -> list[PiiSpan]:
-    """Keep non-overlapping spans, preferring earlier start then longer length.
+    """Merge overlapping spans into one covering span per overlapping group.
 
     Tokenization replaces text ranges, so overlapping spans would corrupt each
-    other. Detectors should already avoid overlaps; this is a defensive backstop.
+    other. Discarding one span of an overlapping pair (rather than merging)
+    would leave that span's non-covered characters in cleartext - e.g. an
+    email nested inside a matched URL, or a longer phone number starting
+    just after a shorter ID match. Merging guarantees every character any
+    detector flagged is masked, regardless of which span "wins". Candidates
+    arrive in category-priority order (see patterns.ORDERED_PATTERNS), and
+    the sort below is stable, so the surviving label for a merged group is
+    the highest-priority category among the spans that started it.
     """
-    ordered = sorted(spans, key=lambda s: (s.start, -(s.end - s.start)))
-    selected: list[PiiSpan] = []
-    last_end = -1
+    ordered = sorted((s for s in spans if s.end > s.start), key=lambda s: s.start)
+    merged: list[PiiSpan] = []
     for span in ordered:
-        if span.start < last_end:
+        if merged and span.start < merged[-1].end:
+            previous = merged[-1]
+            merged[-1] = PiiSpan(
+                start=previous.start,
+                end=max(previous.end, span.end),
+                category=previous.category,
+            )
             continue
-        if span.end <= span.start:
-            continue
-        selected.append(span)
-        last_end = span.end
-    return selected
+        merged.append(span)
+    return merged

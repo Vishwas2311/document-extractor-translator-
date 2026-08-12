@@ -29,14 +29,62 @@ async def test_regex_detector_preserves_order_and_length() -> None:
     assert results[1]  # the second has a numeric id
 
 
+async def test_regex_detector_covers_email_nested_in_url() -> None:
+    # Regression: URL_RE matches the whole URL (starting before the nested
+    # email), while EMAIL_RE independently matches the embedded address. The
+    # old start-position-only dedupe kept the url span (it starts earlier)
+    # and dropped the email span outright, but the discarded span's tail
+    # extended past the kept span - so its non-covered characters stayed in
+    # cleartext. Every character either pattern flagged must be masked.
+    # Confirmed by code review on 2026-08-12.
+    text = "See http://example.com?contact=jane@example.com for details"
+    detector = RegexPiiDetector()
+    [spans] = await detector.detect_batch([text], language="en")
+    email_start = text.index("jane@example.com")
+    email_end = email_start + len("jane@example.com")
+    assert any(span.start <= email_start and span.end >= email_end for span in spans), (
+        f"no span in {spans} fully covers the nested email at [{email_start}, {email_end})"
+    )
+
+
 def test_dedupe_overlaps_keeps_non_overlapping() -> None:
     spans = [
         PiiSpan(0, 5, "a"),
-        PiiSpan(3, 8, "b"),  # overlaps first
+        PiiSpan(6, 8, "b"),
         PiiSpan(8, 10, "c"),
     ]
     kept = dedupe_overlaps(spans)
-    assert [(s.start, s.end) for s in kept] == [(0, 5), (8, 10)]
+    assert [(s.start, s.end) for s in kept] == [(0, 5), (6, 8), (8, 10)]
+
+
+def test_dedupe_overlaps_merges_overlapping_spans_instead_of_dropping_one() -> None:
+    # Regression: the previous implementation picked one overlapping span and
+    # discarded the other outright, leaving the discarded span's non-covered
+    # characters unmasked - e.g. an email nested inside a matched URL, or (as
+    # here) a longer id-like match whose tail extends past a shorter one.
+    # Confirmed by code review on 2026-08-12.
+    spans = [
+        PiiSpan(0, 5, "a"),
+        PiiSpan(3, 8, "b"),  # overlaps "a" and extends past it
+        PiiSpan(8, 10, "c"),
+    ]
+    kept = dedupe_overlaps(spans)
+    # The merged span must cover every character either overlapping span
+    # flagged (0-8), not just the earlier-starting one's original range (0-5).
+    assert [(s.start, s.end) for s in kept] == [(0, 8), (8, 10)]
+    assert kept[0].category == "a"  # earlier (higher-priority) category wins the label
+
+
+def test_dedupe_overlaps_nested_span_is_fully_covered() -> None:
+    # Regression: an email fully nested inside a matched URL must still result
+    # in the whole URL being masked, not just the email's inner range.
+    spans = [
+        PiiSpan(4, 40, "url"),
+        PiiSpan(20, 37, "email"),  # nested inside the url span
+    ]
+    kept = dedupe_overlaps(spans)
+    assert [(s.start, s.end) for s in kept] == [(4, 40)]
+    assert kept[0].category == "url"
 
 
 async def test_azure_detector_fails_closed_without_endpoint() -> None:

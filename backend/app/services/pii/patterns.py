@@ -13,7 +13,8 @@ URL_RE = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.IGNORECASE)
 # Long digit runs and common ID-like tokens (case numbers, MRNs, etc.).
 ID_RE = re.compile(r"\b(?:ID|MRN|SSN|NINO|CASE)[-:#\s]?\d{4,}\b|\b\d{6,}\b", re.IGNORECASE)
 
-# Priority order: earlier categories win when spans overlap.
+# Priority order: when spans overlap, they are merged (see dedupe_overlaps) and
+# the merged span is labeled with the earlier category.
 ORDERED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("email", EMAIL_RE),
     ("url", URL_RE),
