@@ -2,11 +2,13 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from app.core.config import Settings
+from app.core.exceptions import ConfigurationError
 from app.database.session import Database
 from app.integrations.azure_openai.translator import AzureOpenAITranslator
 from app.integrations.document_intelligence.client import DocumentIntelligenceAnalyzer
 from app.integrations.document_intelligence.mapper import DocumentIntelligenceMapper
 from app.repositories.documents import DocumentRepository
+from app.services.cost_governor import CostGovernor
 from app.services.document import DocumentService
 from app.services.export import ExportService
 from app.services.financial import FinancialCandidateSelector, FinancialExtractionService
@@ -32,6 +34,7 @@ class ServiceContainer:
     processing_service: ProcessingService
     runner: JobRunner
     gateway: SecurityGateway
+    cost_governor: CostGovernor
 
     async def close(self) -> None:
         await self.runner.stop()
@@ -41,6 +44,17 @@ class ServiceContainer:
 
 
 async def create_container(settings: Settings) -> ServiceContainer:
+    # Do not accept a production-looking setting and then silently construct the
+    # local adapter. Unsupported adapters fail explicitly until their concrete
+    # implementations and integration evidence are present.
+    if settings.storage_backend != "local":
+        raise ConfigurationError(
+            f"Storage backend '{settings.storage_backend}' is not implemented in this build."
+        )
+    if settings.queue_backend != "in_process":
+        raise ConfigurationError(
+            f"Queue backend '{settings.queue_backend}' is not implemented in this build."
+        )
     database_url = settings.database_url
     if database_url is None:
         raise RuntimeError("Database URL was not resolved.")
@@ -51,7 +65,8 @@ async def create_container(settings: Settings) -> ServiceContainer:
     storage = LocalArtifactStorage(settings.storage_root)
     repository = DocumentRepository(database.session_factory)
     analyzer = DocumentIntelligenceAnalyzer(settings)
-    translator = AzureOpenAITranslator(settings)
+    cost_governor = CostGovernor.from_settings(settings)
+    translator = AzureOpenAITranslator(settings, cost_governor)
     gateway = SecurityGateway(settings)
     processing_service = ProcessingService(
         repository=repository,
@@ -107,6 +122,7 @@ async def create_container(settings: Settings) -> ServiceContainer:
         processing_service=processing_service,
         runner=runner,
         gateway=gateway,
+        cost_governor=cost_governor,
     )
     await runner.start()
     return container

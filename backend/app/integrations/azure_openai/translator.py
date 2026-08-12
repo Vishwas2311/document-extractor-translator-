@@ -23,9 +23,18 @@ from app.core.config import Settings
 from app.core.exceptions import AzureServiceError, ConfigurationError
 from app.prompts.translation import TRANSLATION_DEVELOPER_PROMPT
 from app.schemas.translation import TranslationBatchRequest, TranslationBatchResponse
+from app.services.cost_governor import CostGovernor
 
 _FALLBACK_WAIT = wait_random_exponential(multiplier=1, max=20)
 _MAX_RATE_LIMIT_WAIT_SECONDS = 60.0
+# Rough token estimate for budget accounting only (never for billing): ~4 chars/token.
+_CHARS_PER_TOKEN = 4
+_PROMPT_TOKEN_OVERHEAD = 256
+
+
+def estimate_translation_tokens(request: TranslationBatchRequest) -> int:
+    payload_chars = len(request.model_dump_json())
+    return _PROMPT_TOKEN_OVERHEAD + payload_chars // _CHARS_PER_TOKEN
 
 
 def translation_retry_wait(retry_state: RetryCallState) -> float:
@@ -45,22 +54,38 @@ def translation_retry_wait(retry_state: RetryCallState) -> float:
 
 
 class AzureOpenAITranslator:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, governor: CostGovernor | None = None) -> None:
         self.settings = settings
         self._client: AsyncOpenAI | None = None
+        self._credential: Any | None = None
+        self._governor = governor or CostGovernor.from_settings(settings)
 
     def _get_client(self) -> AsyncOpenAI:
         if self.settings.azure_auth_mode == "managed_identity":
-            # `azure_openai_configured` (config.py) treats managed_identity as valid
-            # with no api_key required, but there is no managed-identity/AAD token
-            # credential wiring here - only the api_key path below is implemented.
-            # Fail with an explicit, honest error instead of falling through to the
-            # generic "not configured" message below (which would be misleading -
-            # the settings *are* present, this mode just isn't built yet).
-            raise ConfigurationError(
-                "Azure OpenAI auth_mode 'managed_identity' is not implemented. "
-                "Set AZURE_AUTH_MODE=api_key and provide AZURE_OPENAI_API_KEY instead."
-            )
+            base_url = self.settings.azure_openai_base_url
+            if not base_url or not self.settings.azure_openai_deployment:
+                raise ConfigurationError(
+                    "Azure OpenAI managed identity requires the base URL and deployment."
+                )
+            if self._client is None:
+                from azure.identity.aio import DefaultAzureCredential
+
+                credential = DefaultAzureCredential()
+                self._credential = credential
+
+                async def token_provider() -> str:
+                    token = await credential.get_token(
+                        "https://cognitiveservices.azure.com/.default"
+                    )
+                    return str(token.token)
+
+                self._client = AsyncOpenAI(
+                    api_key=token_provider,
+                    base_url=base_url,
+                    timeout=self.settings.azure_request_timeout_seconds,
+                    max_retries=0,
+                )
+            return self._client
         base_url = self.settings.azure_openai_base_url
         api_key = self.settings.azure_openai_api_key
         if not base_url or not api_key or not self.settings.azure_openai_deployment:
@@ -78,6 +103,9 @@ class AzureOpenAITranslator:
         return self._client
 
     async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        # Fail closed before doing any billable work if a global budget or the
+        # operator kill switch would be exceeded.
+        await self._governor.reserve(estimated_tokens=estimate_translation_tokens(request))
         client = self._get_client()
         deployment = self.settings.azure_openai_deployment
         if deployment is None:
@@ -206,3 +234,6 @@ class AzureOpenAITranslator:
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
+        if self._credential is not None:
+            await self._credential.close()
+            self._credential = None

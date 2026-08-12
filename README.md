@@ -364,6 +364,24 @@ npm test
 
 The local evaluation baseline uses SQLite, local artifact storage, and an in-process worker. It includes backend authentication tokens and processing-profile enforcement, but not Entra tenant authorization, managed persistence, malware quarantine, private networking, or durable provider-deletion evidence. **Do not use real personal, youth-care, clinical, legal, education, justice, or other sensitive records.**
 
+## Production hardening implemented in code
+
+The backend has an explicit production fail-closed boundary. With `APP_ENV=production`, startup
+rejects local bearer tokens, SQLite, local storage, in-process jobs, runtime `create_all`, API-key
+Azure authentication, regex-only PII detection, disabled scanning/audit/private networking, weak
+pseudonymization secrets, disabled rate limiting, and localhost or non-HTTPS CORS origins.
+
+Implemented production-facing boundaries include Entra JWT verification; Azure OpenAI managed
+identity; administrator-only local profile overrides and no request overrides in production;
+production review `If-Match` checks; expanded source/download/review audit events; stricter request
+IDs and rate-limit headers; reduced public readiness detail; explicit refusal of unavailable
+production adapters; safer deletion ordering; and a non-root health-checked API image plus CI
+coverage, vulnerability-audit, and migration-smoke gates.
+
+These controls do not deploy Blob, Service Bus, Defender, multilingual PII detection, immutable
+audit storage, private networking, Entra registration, or retention infrastructure. Those remain
+mandatory prerequisites before real sensitive data is approved.
+
 ## Financial-only extraction
 
 **Implemented in the local evaluation baseline:** the processing pipeline creates versioned financial page classifications, an ordered financial-content stream, normalized financial tables, validation findings, JSON/CSV/XLSX exports, and result-hash-bound append-only reviewer decisions. The financial-content stream preserves tables as grids, headings as headings, key-values as pairs, lists as lists, and narrative financial text as paragraphs. The UI provides source/English financial document views plus Financial, Review, and All server-filtered page modes while preserving original PDF page numbers and source geometry.

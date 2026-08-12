@@ -11,9 +11,9 @@ from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.enums import (
+    RETRIABLE_DOCUMENT_STATUSES,
     TERMINAL_DOCUMENT_STATUSES,
     DocumentStatus,
-    JobStatus,
     RetryMode,
 )
 from app.core.exceptions import ConflictError, InvalidDocumentError
@@ -171,8 +171,17 @@ class DocumentService:
             raise ConflictError(
                 "Approved documents cannot be overwritten by retry."
             )
-        job = await self.repository.create_retry_job(document_id, mode=mode)
         if mode == RetryMode.REPROCESS:
+            # Best-effort pre-check so cleanup never destroys artifacts of a
+            # document that could not be retried anyway. The atomic status guard
+            # remains inside create_retry_job.
+            if DocumentStatus(document.status) not in RETRIABLE_DOCUMENT_STATUSES:
+                raise ConflictError(
+                    "Only failed, cancelled, or reviewable documents can be retried."
+                )
+            # Artifact invalidation must complete BEFORE the retry job exists.
+            # Otherwise the recovery sweeper can claim the queued job mid-cleanup
+            # and resume from stale normalized/extracted artifacts.
             try:
                 # Invalidate the completion marker before touching any derived file.
                 # Readers can then fail closed even if cleanup is interrupted midway.
@@ -189,29 +198,20 @@ class DocumentService:
                 ):
                     await self.storage.delete_prefix(document_id, prefix)
             except Exception:
+                # No retry job was created yet, so there is no orphan queued job.
                 now = datetime.now(UTC)
-                await self.repository.finish_processing(
+                await self.repository.update_document(
                     document_id,
-                    job.id,
-                    document_values={
-                        "status": DocumentStatus.FAILED.value,
-                        "current_stage": DocumentStatus.FAILED.value,
-                        "error_code": "reprocess_cleanup_failed",
-                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
-                        "completed_at": now,
-                    },
-                    job_values={
-                        "status": JobStatus.FAILED.value,
-                        "stage": DocumentStatus.FAILED.value,
-                        "error_code": "reprocess_cleanup_failed",
-                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
-                        "completed_at": now,
-                    },
+                    status=DocumentStatus.FAILED.value,
+                    current_stage=DocumentStatus.FAILED.value,
+                    error_code="reprocess_cleanup_failed",
+                    safe_error_message="Derived artifacts could not be invalidated safely.",
+                    completed_at=now,
                 )
                 raise
         elif mode == RetryMode.RETRANSLATE:
             await self.storage.delete_prefix(document_id, "translations")
-        return job
+        return await self.repository.create_retry_job(document_id, mode=mode)
 
     async def cancel(self, document_id: str) -> Document:
         return await self.repository.cancel_document(document_id)
@@ -220,7 +220,6 @@ class DocumentService:
         document = await self.repository.get(document_id)
         if DocumentStatus(document.status) not in TERMINAL_DOCUMENT_STATUSES:
             raise ConflictError("A document cannot be deleted while it is processing.")
-        await self.repository.delete(document_id)
         try:
             await self.storage.delete_document(document_id)
         except OSError:
@@ -228,3 +227,7 @@ class DocumentService:
                 "document_storage_cleanup_failed",
                 document_id=document_id,
             )
+            # Preserve the database record so deletion can be retried and the
+            # remaining artifact is not orphaned without an owner or policy.
+            raise
+        await self.repository.delete(document_id)

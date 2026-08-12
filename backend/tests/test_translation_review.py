@@ -91,6 +91,12 @@ class _TranslationReviewRepository:
             setattr(self.document, key, value)
 
     async def create_translation_review(self, review: TranslationReview) -> TranslationReview:
+        # Mirrors the real repository's hash binding: a review computed from a
+        # drifted on-disk artifact must conflict with the stored column.
+        if self.document.translation_result_sha256 != review.result_sha256:
+            raise ConflictError(
+                "The translation result changed before the review could be saved."
+            )
         review.id = f"tr-{len(self.persisted) + 1}"
         self.persisted.append(review)
         self.document.translation_review_status = review.decision
@@ -182,3 +188,111 @@ async def test_translation_review_route_writes_approved_export(tmp_path: Path) -
         "reviewed-bilingual",
     )
     assert Path(downloaded.path).name.endswith("reviewed-bilingual-document.json")
+
+
+def _bilingual_fixture(document_id: str, *, review_required: bool = False) -> dict[str, object]:
+    return {
+        "document_id": document_id,
+        "blocks": [
+            {
+                "block_id": "b1",
+                "translated_text": "Machine",
+                "review_required": review_required,
+                "warnings": [],
+            }
+        ],
+        "tables": [],
+    }
+
+
+def _document(document_id: str, stored_sha256: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=document_id,
+        status="needs_review",
+        processing_version=CURRENT_PROCESSING_VERSION,
+        translation_result_sha256=stored_sha256,
+        organization_id="org-local",
+        owner_subject="reviewer-1",
+        assigned_reviewer_subject=None,
+        document_review_status="needs_review",
+        original_filename="sample.pdf",
+        error_code=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_translation_review_conflicts_when_stored_hash_differs_from_artifact(
+    tmp_path: Path,
+) -> None:
+    """DB-vs-disk drift: the stored translation_result_sha256 no longer matches
+    the bilingual artifact on disk. The review must be rejected with a 409 and
+    must not write a reviewed artifact."""
+    document_id = "doc-hash-drift"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    await storage.write_json(
+        document_id, "exports/bilingual-document.json", _bilingual_fixture(document_id)
+    )
+    document = _document(document_id, stored_sha256="f" * 64)
+    repository = _TranslationReviewRepository(document)
+    container = SimpleNamespace(repository=repository, storage=storage)
+
+    with pytest.raises(ConflictError, match="changed before the review") as excinfo:
+        await create_translation_review(
+            _request(container),
+            document_id,
+            TranslationReviewCreate(decision="rejected", note="Checking drift"),
+        )
+
+    assert excinfo.value.status_code == 409
+    assert repository.persisted == []
+    # A failed review record must leave no reviewed artifact behind.
+    assert not storage.exists(document_id, REVIEWED_BILINGUAL_PATH)
+
+
+@pytest.mark.asyncio
+async def test_rejected_translation_review_writes_no_reviewed_artifact(
+    tmp_path: Path,
+) -> None:
+    document_id = "doc-rejected-review"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    bilingual = _bilingual_fixture(document_id)
+    await storage.write_json(document_id, "exports/bilingual-document.json", bilingual)
+    document = _document(document_id, stored_sha256=bilingual_result_sha256(bilingual))
+    repository = _TranslationReviewRepository(document)
+    container = SimpleNamespace(repository=repository, storage=storage)
+
+    persisted = await create_translation_review(
+        _request(container),
+        document_id,
+        TranslationReviewCreate(decision="rejected", note="Needs rework"),
+    )
+
+    assert persisted.decision == "rejected"
+    assert repository.persisted
+    # Only approvals materialize the reviewed export.
+    assert not storage.exists(document_id, REVIEWED_BILINGUAL_PATH)
+
+
+@pytest.mark.asyncio
+async def test_translation_review_backfills_a_missing_stored_hash(
+    tmp_path: Path,
+) -> None:
+    document_id = "doc-backfill-hash"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    bilingual = _bilingual_fixture(document_id)
+    await storage.write_json(document_id, "exports/bilingual-document.json", bilingual)
+    document = _document(document_id, stored_sha256=None)
+    repository = _TranslationReviewRepository(document)
+    container = SimpleNamespace(repository=repository, storage=storage)
+
+    persisted = await create_translation_review(
+        _request(container),
+        document_id,
+        TranslationReviewCreate(decision="rejected", note="First review"),
+    )
+
+    assert persisted.result_sha256 == bilingual_result_sha256(bilingual)
+    assert document.translation_result_sha256 == persisted.result_sha256

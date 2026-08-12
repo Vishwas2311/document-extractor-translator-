@@ -57,6 +57,36 @@ def test_assert_pdf_safe_rejects_corrupted_garbage_bytes(tmp_path: Path) -> None
         assert_pdf_safe(path, max_pages=300)
 
 
+def test_assert_pdf_safe_rejects_a_large_unparseable_pdf_with_encrypt_in_the_trailer(
+    tmp_path: Path,
+) -> None:
+    """The /Encrypt reference normally lives in the trailer at the END of the
+    file. A pypdf-unparseable file larger than the 2MB head scan must still be
+    rejected via the tail scan."""
+    path = tmp_path / "encrypted-trailer.pdf"
+    filler = b"\x00\x01\x02not-a-real-object-stream" * 90_000  # ~2.4 MB, unparseable
+    trailer = b"\ntrailer\n<< /Size 4 /Encrypt 5 0 R /Root 1 0 R >>\nstartxref\n0\n%%EOF\n"
+    path.write_bytes(b"%PDF-1.7\n" + filler + trailer)
+
+    with pytest.raises(InvalidDocumentError, match="[Ee]ncrypted"):
+        assert_pdf_safe(path, max_pages=300)
+
+
+def test_count_fallback_detects_encrypt_beyond_the_head_and_tail_scans(
+    tmp_path: Path,
+) -> None:
+    """An /Encrypt marker in the middle of a >4MB pypdf-unparseable file escapes
+    both the head and tail scans; the heuristic fallback's chunk scan must
+    catch it."""
+    path = tmp_path / "encrypted-middle.pdf"
+    filler = b"\x00\x01\x02junk-object-bytes-without-markers" * 70_000  # ~2.5 MB
+    middle = b" /Encrypt 5 0 R "
+    path.write_bytes(b"%PDF-1.7\n" + filler + middle + filler)
+
+    with pytest.raises(InvalidDocumentError, match="[Ee]ncrypted"):
+        assert_pdf_safe(path, max_pages=300)
+
+
 def test_assert_pdf_safe_does_not_reject_an_unparseable_pdf_the_heuristic_undercounts(
     tmp_path: Path,
 ) -> None:

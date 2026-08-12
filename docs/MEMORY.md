@@ -60,11 +60,16 @@ The core ordering invariant is: **upload → extract → normalize → detect la
 
 The default LLM path uses the backend Data Security Gateway with
 `GENAI_PSEUDONYMIZED` (deterministic token replacement for emails/phones/URLs/IDs).
-`GENAI_SYNTHETIC_POC` may still send raw synthetic text when
-`ALLOW_SYNTHETIC_RAW_LLM=true`. Confidential/restricted data cannot use the
-synthetic raw path. Document API routes require `Authorization: Bearer` when
-`AUTH_REQUIRED=true` (default). Full Entra/APIM/private networking remains a
-production target, not a local claim.
+Profile selection uses an explicit allow-matrix that fails closed for any
+data-class/profile combination not explicitly approved. `GENAI_SYNTHETIC_POC`
+may still send raw text when `ALLOW_SYNTHETIC_RAW_LLM=true`, but only for
+synthetic data; de-identified, confidential, and restricted data are limited to
+`GENAI_PSEUDONYMIZED` (or `GENAI_RAW_EXCEPTION`, which requires
+`GENAI_RAW_EXCEPTION_ENABLED=true` for every data class). Document API routes
+require `Authorization: Bearer` when `AUTH_REQUIRED=true` (default). Retry and
+cancel are owner-scoped mutating actions (owner, `org_admin`, `operator`);
+auditors and non-owner reviewers cannot mutate processing state. Full
+Entra/APIM/private networking remains a production target, not a local claim.
 
 ## 5. Current technology snapshot
 
@@ -80,7 +85,9 @@ production target, not a local claim.
   [ARCHITECTURE.md §26](./ARCHITECTURE.md).
 - Azure AI Document Intelligence with the `prebuilt-layout` model.
 - Azure OpenAI chat completion deployment configured for `gpt-4.1`.
-- Alembic migrations are the schema-change mechanism; 8 revisions exist. A startup-time
+- Alembic migrations are the schema-change mechanism; 9 revisions exist
+  (`0009_review_status_constraints` adds the translation/document review-status
+  CHECK constraints that migration 0008 omitted). A startup-time
   `create_all()`/ad hoc column-patch path also exists behind `USE_CREATE_ALL` and should not be
   used for production schema changes — see [RULES.md §11](./RULES.md).
 
@@ -97,7 +104,7 @@ These versions are a baseline snapshot, not a permanent constraint. Recheck lock
 ## 6. Stable processing constants
 
 - **Artifact schema version:** `1.0`.
-- **Processing version:** `prd-local-4` for newly created documents; prior stored attempts retain their original version. (The version-string prefix predates the current Azure-only deployment framing; it is a stable identifier, not a description of where the app runs.)
+- **Processing version:** `prd-local-5` for newly created documents; prior stored attempts retain their original version. (`prd-local-5` covers the dedupe review-flag merge fix and terminal-status handling for pages excluded from translation. The version-string prefix predates the current Azure-only deployment framing; it is a stable identifier, not a description of where the app runs.)
 - **Translation prompt version:** `translation-v3-multilingual-format-aware`.
 - **OCR confidence review threshold:** `0.85`.
 - **Translation batch limit:** 40 blocks.
@@ -358,17 +365,27 @@ The readable diagram and complete service-control matrix are in `docs/DATA-SECUR
 16. Azure AI Translator and connected/disconnected Document Intelligence/Translator container routes are not implemented.
 17. Managed identity enforcement, private endpoints, outbound egress allowlisting, allowed-region/deployment policy, and modified-abuse-monitoring verification are not implemented.
 
-## 13. Quality baseline from the 2026-08-06 review
+## 13. Quality baseline from the 2026-08-12 review
 
 The following results describe the inspected revision only:
 
-- Current backend gate: Ruff passed, Mypy passed for 74 source files, and 119 tests passed.
-- Current frontend gate: production build passed; two rendered HTML tests passed; lint had zero errors and two existing image-element warnings.
+- Working-tree hardening adds production startup invariants, Entra JWT verification, Azure
+  OpenAI managed identity, production review `If-Match` checks, broader access/download/review
+  audit events, safer deletion ordering, explicit adapter refusal, rate-limit metadata, reduced
+  public readiness detail, a non-root image, and CI security gates. Managed Blob, Service Bus,
+  Defender, multilingual PII, immutable audit, private networking and retention remain deployment
+  targets rather than deployed facts.
+
+- Current backend gate: Ruff passed, Mypy passed, and 296 tests passed.
+- Current frontend gate: production build passed; two rendered HTML tests passed; lint had zero errors.
+- The 2026-08-12 bug-audit remediation fixed 31 code findings (16 backend, 15 frontend) plus the previously failing SSR shell test; the demo now opens on the Page view (it has no financial stream), while uploaded/opened documents still default to the Financial view.
+- Security response headers are now emitted on every response: the API applies them via `SecurityHeadersMiddleware` (X-Content-Type-Options, X-Frame-Options: DENY, Referrer-Policy, Cross-Origin-Opener/Resource-Policy, Permissions-Policy, HSTS, and a `default-src 'none'` CSP with a relaxed CSP only on the local docs routes), and the frontend Cloudflare worker wraps every response with an app-appropriate CSP plus the same hardening headers. Verified live against the running API on 2026-08-12.
+- Live end-to-end verification on 2026-08-12 (synthetic 2-page PDF): Azure Document Intelligence extraction succeeded (pages, blocks, geometry, table, language detection incl. zh-Hans). Azure OpenAI translation could not be verified because the configured UAT resource returned HTTP 403 Forbidden; the app failed closed correctly (per-block `translation_status: failed`, review flags raised, no fabricated output, safe error surfaced, document not marked falsely complete). The 403 is an environment/credential/network issue on the Azure OpenAI resource, not an application defect.
 - Current frontend production dependency audit (2026-08-08, after upgrading `vinext` to
   `1.0.0-beta.5` and Next.js/lint config to 16.3.0): 2 high-severity `npm audit` findings in
   `image-size` (transitive via `vinext`), no upstream patch available; confirmed unreachable in
   this app's build — see section 12, item 11.
-- Alembic upgraded from base through `0007_financial_structure_reviews` and downgraded to base successfully on a disposable SQLite database.
+- Alembic upgraded from base through `0009_review_status_constraints` and downgraded to base successfully on a disposable SQLite database.
 - Repository CI is established (GitHub Actions, §12 item 10); Azure deployment evidence is not.
 
 Re-run all relevant checks after copying these documents or changing code. Replace this section when a newer verified baseline exists; do not simply append an ever-growing test diary.

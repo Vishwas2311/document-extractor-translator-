@@ -35,6 +35,7 @@ class Database:
             audit_event,
             document,
             financial_review,
+            idempotency,
             processing_job,
             translation_review,
         )

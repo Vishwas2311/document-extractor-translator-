@@ -13,6 +13,13 @@
 
 > **Important:** This document describes proposed production controls. It is not evidence that those controls are deployed. The current implementation has bearer-token authentication plus an organization/ownership/role authorization layer, but not Entra ID federation, and not the full P2 platform control set (private networking, managed identities, malware scanning, retention automation). It uses Azure Document Intelligence and Azure OpenAI and is approved only for synthetic or explicitly approved de-identified test data until the remaining gates in this document are closed.
 
+> **Working-tree update (2026-08-12):** Entra JWT verification and Azure OpenAI managed-identity
+> code paths, strict production startup invariants, server-owned production profile selection,
+> review concurrency checks, broader audit events, and safer deletion ordering are implemented.
+> Entra registration, Blob, Service Bus, Defender, multilingual PII, immutable audit, private
+> endpoints, egress controls, retention jobs, and deletion receipts still require deployed
+> infrastructure and evidence; the real-data prohibition remains.
+
 ## 1. Executive recommendation
 
 1. **Policy ID:** SEC-01
@@ -595,11 +602,15 @@ Option D is the proposed normal Azure OpenAI-enabled production route because th
 The backend policy engine must choose one of these profiles. A browser request, user role, retry, or provider outage must never downgrade the policy.
 
 1. **Profile:** `GENAI_SYNTHETIC_POC` (persisted compatibility identifier)
-   - **Permitted data:** Synthetic or explicitly approved de-identified test data
+   - **Permitted data:** Synthetic test data only (requires `ALLOW_SYNTHETIC_RAW_LLM=true`);
+     de-identified data is not eligible for this raw path and must use `GENAI_PSEUDONYMIZED`
    - **OCR/extraction:** Current Azure Document Intelligence path
    - **Translation:** Current Azure OpenAI path permitted for testing
-   - **Generative AI:** Permitted for approved test data
-   - **Current status:** Current local-evaluation constraint
+   - **Generative AI:** Permitted for synthetic test data under the flag above
+   - **Current status:** Current local-evaluation constraint; the implemented backend gateway
+     enforces an explicit data-class/profile allow-matrix that fails closed for any
+     combination not listed (`GENAI_RAW_EXCEPTION` additionally requires
+     `GENAI_RAW_EXCEPTION_ENABLED=true` for every data class)
 
 2. **Profile:** `GENAI_PSEUDONYMIZED`
    - **Permitted data:** Approved confidential or lower-classification data after policy
@@ -745,6 +756,7 @@ For `GENAI_PSEUDONYMIZED` and `GENAI_RAW_EXCEPTION`, all of the following are ma
 - Enforce strict schemas, stable block IDs, order and coverage checks, protected-token checks, and review thresholds.
 - Serve sensitive responses with an explicit cache policy such as `Cache-Control: no-store`; prevent indexing and avoid content in URLs.
 - Use a restrictive Content Security Policy, secure cookies, CSRF protection where applicable, download controls, and short session lifetimes.
+  - **Implemented (2026-08-12):** security response headers now ship on every response. The API's `SecurityHeadersMiddleware` emits `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`, `Permissions-Policy`, `Strict-Transport-Security`, and a `default-src 'none'` CSP (relaxed only on local docs routes). The frontend Cloudflare worker wraps every response with an app-appropriate CSP (`worker-src blob:` and `wasm-unsafe-eval` for the PDF.js viewer, no third-party origins) plus the same hardening headers. Verified live against the running API.
 - Avoid third-party analytics, session replay, browser error capture, support widgets, and CDN transformations on sensitive pages unless their data behavior is approved and content is excluded.
 - Clear page images, object URLs, extracted text, and translation state when the session or document view ends where technically feasible.
 

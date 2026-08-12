@@ -6,10 +6,15 @@ from types import SimpleNamespace
 import pytest
 from starlette.requests import Request
 
-from app.api.routes.documents import create_financial_review, download_artifact, list_pages
+from app.api.routes.documents import (
+    create_financial_review,
+    download_artifact,
+    get_source,
+    list_pages,
+)
 from app.core.auth import AuthPrincipal
 from app.core.enums import FinancialPageDisposition
-from app.core.exceptions import ConflictError, InvalidDocumentError
+from app.core.exceptions import ConflictError, DocumentNotFoundError, InvalidDocumentError
 from app.models.financial_review import FinancialReview
 from app.schemas.financial import (
     FinancialCell,
@@ -87,6 +92,48 @@ class DownloadRepository:
             assigned_reviewer_subject=None,
             document_review_status="draft",
         )
+
+
+class SourceRepository:
+    async def get(self, document_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=document_id,
+            status="completed",
+            stored_extension="pdf",
+            content_type="application/pdf",
+            original_filename="synthetic.pdf",
+            error_code=None,
+            organization_id="org-local",
+            owner_subject="synthetic-reviewer",
+            assigned_reviewer_subject=None,
+            document_review_status="draft",
+        )
+
+
+async def test_get_source_returns_404_when_the_stored_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    document_id = "doc-missing-source"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    container = SimpleNamespace(repository=SourceRepository(), storage=storage)
+
+    with pytest.raises(DocumentNotFoundError, match="Source document") as excinfo:
+        await get_source(_request(container), document_id)
+
+    assert excinfo.value.status_code == 404
+
+
+async def test_get_source_serves_an_existing_file(tmp_path: Path) -> None:
+    document_id = "doc-existing-source"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    storage.source_path(document_id, "pdf").write_bytes(b"%PDF-1.7 synthetic")
+    container = SimpleNamespace(repository=SourceRepository(), storage=storage)
+
+    response = await get_source(_request(container), document_id)
+
+    assert Path(response.path) == storage.source_path(document_id, "pdf")
 
 
 @pytest.mark.parametrize("document_status", ["failed", "cancelled"])

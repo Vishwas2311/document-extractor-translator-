@@ -168,7 +168,7 @@ async def test_financial_review_is_append_only_and_updates_document_summary(
                         "reason": "Confirmed EU decimal format.",
                     }
                 ],
-                processing_version="prd-local-4",
+                processing_version="prd-local-5",
                 result_schema_version="financial-result-1.4",
                 result_sha256="a" * 64,
                 created_at=reviewed_at,
@@ -207,6 +207,10 @@ async def test_reprocess_retry_resets_all_derived_document_counters(tmp_path: Pa
             financial_review_status="rejected",
             financial_reviewed_by="prior-reviewer",
             financial_reviewed_at=datetime.now(UTC),
+            translation_result_sha256="c" * 64,
+            translation_review_status="rejected",
+            translation_reviewed_by="prior-reviewer",
+            translation_reviewed_at=datetime.now(UTC),
             source_languages=["ar"],
         )
 
@@ -224,7 +228,93 @@ async def test_reprocess_retry_resets_all_derived_document_counters(tmp_path: Pa
         assert document.financial_review_status is None
         assert document.financial_reviewed_by is None
         assert document.financial_reviewed_at is None
+        assert document.translation_result_sha256 is None
+        assert document.translation_review_status is None
+        assert document.translation_reviewed_by is None
+        assert document.translation_reviewed_at is None
         assert document.source_languages == []
-        assert document.processing_version == "prd-local-4"
+        assert document.processing_version == "prd-local-5"
+    finally:
+        await database.dispose()
+
+
+async def test_retranslate_retry_clears_stale_review_verdicts_but_keeps_history(
+    tmp_path: Path,
+) -> None:
+    repository, database = await _new_repository(tmp_path)
+    try:
+        document_id, _ = await _seed_document(
+            repository, status=DocumentStatus.NEEDS_REVIEW.value
+        )
+        await repository.update_document(
+            document_id,
+            financial_result_sha256="b" * 64,
+            financial_review_status="rejected",
+            financial_reviewed_by="prior-reviewer",
+            financial_reviewed_at=datetime.now(UTC),
+            translation_result_sha256="c" * 64,
+            translation_review_status="rejected",
+            translation_reviewed_by="prior-reviewer",
+            translation_reviewed_at=datetime.now(UTC),
+        )
+        review = await repository.create_financial_review(
+            FinancialReview(
+                document_id=document_id,
+                decision="rejected",
+                reviewer_subject="prior-reviewer:tok",
+                corrections=[],
+                processing_version="prd-local-5",
+                result_schema_version="financial-result-1.4",
+                result_sha256="b" * 64,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+        await repository.create_retry_job(document_id, mode=RetryMode.RETRANSLATE)
+
+        document = await repository.get(document_id)
+        # The retranslated results get new hashes, so the summary verdicts reset.
+        assert document.translation_result_sha256 is None
+        assert document.translation_review_status is None
+        assert document.translation_reviewed_by is None
+        assert document.translation_reviewed_at is None
+        assert document.financial_result_sha256 is None
+        assert document.financial_review_status is None
+        assert document.financial_reviewed_by is None
+        assert document.financial_reviewed_at is None
+        # Append-only review history is preserved.
+        history = await repository.financial_reviews(document_id)
+        assert [item.id for item in history] == [review.id]
+    finally:
+        await database.dispose()
+
+
+async def test_create_retry_job_refuses_an_approved_document_atomically(
+    tmp_path: Path,
+) -> None:
+    """Simulates the approve/retry race: the approval commits after the
+    service-level check would have passed, so create_retry_job itself must
+    refuse to flip the document back to queued or create a job."""
+    repository, database = await _new_repository(tmp_path)
+    try:
+        for column in (
+            "financial_review_status",
+            "translation_review_status",
+            "document_review_status",
+        ):
+            document_id, _ = await _seed_document(
+                repository, status=DocumentStatus.NEEDS_REVIEW.value
+            )
+            await repository.update_document(document_id, **{column: "approved"})
+            job_before = await repository.latest_job(document_id)
+
+            for mode in RetryMode:
+                with pytest.raises(ConflictError, match="Approved results"):
+                    await repository.create_retry_job(document_id, mode=mode)
+
+            document = await repository.get(document_id)
+            assert document.status == DocumentStatus.NEEDS_REVIEW.value
+            job_after = await repository.latest_job(document_id)
+            assert job_after.id == job_before.id
     finally:
         await database.dispose()

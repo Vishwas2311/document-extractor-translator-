@@ -102,23 +102,31 @@ def test_rejects_changed_protected_tokens() -> None:
     assert "b1" in invalid
 
 
-def test_protected_re_matches_full_pseudonym_token() -> None:
+async def _pseudonymize_single(
+    gateway: SecurityGateway, text: str
+) -> tuple[str, str, dict[str, str]]:
+    prepared = await gateway.prepare_translation_inputs(
+        ProcessingProfile.GENAI_PSEUDONYMIZED,
+        [TranslationInput(block_id="b1", source_language="en", source_text=text)],
+    )
+    pseudonymized = prepared.inputs[0].source_text
+    token = next(iter(prepared.token_map))
+    return pseudonymized, token, prepared.token_map
+
+
+async def test_protected_re_matches_full_pseudonym_token() -> None:
     # Every character from the kind prefix through the hex digest is a \w character,
     # so the pre-existing [A-Z]{2,}[A-Z0-9_-]* alternative has no internal \b boundary
     # to anchor on and matches none of a real token - not even its "ID_" prefix.
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    gateway._pseudonymize("Case reference 20261225", token_map)
-    token = next(iter(token_map))
+    _, token, _ = await _pseudonymize_single(gateway, "Case reference 20261225")
     assert PSEUDONYM_TOKEN_RE.fullmatch(token)
     assert PROTECTED_RE.findall(token) == [token]
 
 
-def test_rejects_truncated_pseudonym_token() -> None:
+async def test_rejects_truncated_pseudonym_token() -> None:
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    text, _ = gateway._pseudonymize("Reference number 20261225", token_map)
-    token = next(iter(token_map))
+    text, token, _ = await _pseudonymize_single(gateway, "Reference number 20261225")
     inputs = [TranslationInput(block_id="b1", source_language="en", source_text=text)]
     response = TranslationBatchResponse(
         translations=[
@@ -130,11 +138,9 @@ def test_rejects_truncated_pseudonym_token() -> None:
     assert "b1" in invalid
 
 
-def test_rejects_pseudonym_token_with_altered_digest() -> None:
+async def test_rejects_pseudonym_token_with_altered_digest() -> None:
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    text, _ = gateway._pseudonymize("Reference number 20261225", token_map)
-    token = next(iter(token_map))
+    text, token, _ = await _pseudonymize_single(gateway, "Reference number 20261225")
     altered = token[:-2] + ("0" if token[-2] != "0" else "1") + token[-1]
     inputs = [TranslationInput(block_id="b1", source_language="en", source_text=text)]
     response = TranslationBatchResponse(
@@ -145,7 +151,7 @@ def test_rejects_pseudonym_token_with_altered_digest() -> None:
     assert "b1" in invalid
 
 
-def test_pseudonymize_translate_validate_restore_round_trip() -> None:
+async def test_pseudonymize_translate_validate_restore_round_trip() -> None:
     gateway = _gateway()
     # The digit run must be set off by punctuation from surrounding Han text - a bare
     # 6+-digit run directly abutting Han characters on both sides has no \b boundary
@@ -155,7 +161,9 @@ def test_pseudonymize_translate_validate_restore_round_trip() -> None:
             block_id="b1", source_language="zh-Hans", source_text="账户余额：20261225"
         )
     ]
-    prepared = gateway.prepare_translation_inputs(ProcessingProfile.GENAI_PSEUDONYMIZED, inputs)
+    prepared = await gateway.prepare_translation_inputs(
+        ProcessingProfile.GENAI_PSEUDONYMIZED, inputs
+    )
     pseudonymized_text = prepared.inputs[0].source_text
     token = next(iter(prepared.token_map))
     assert token in pseudonymized_text

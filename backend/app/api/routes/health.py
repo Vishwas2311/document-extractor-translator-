@@ -55,22 +55,8 @@ async def readiness(request: Request) -> JSONResponse:
         "database": database_status,
         "storage": storage_status,
         "worker": worker_status,
-        "auth_required": settings.auth_required,
-        "default_processing_profile": settings.default_processing_profile,
-        "default_data_class": settings.default_data_class,
-        "limits": {
-            "max_upload_size_mb": settings.max_upload_size_mb,
-            "max_document_pages": settings.max_document_pages,
-            "di_page_range_size": settings.di_page_range_size,
-            "di_range_concurrency": settings.di_range_concurrency,
-            "translation_concurrency": settings.translation_concurrency,
-            "job_poll_timeout_minutes": 90,
-        },
-        "azure_configured": {
-            "document_intelligence": settings.document_intelligence_configured,
-            "openai": settings.azure_openai_configured,
-        },
-        "openai_deployment_configured": bool(settings.azure_openai_deployment),
+        # Keep unauthenticated readiness operational and content-free. Detailed
+        # configuration remains on the authenticated dependency endpoint.
     }
     status_code = 200 if overall == "ready" else 503
     return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})

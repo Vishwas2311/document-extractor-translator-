@@ -45,7 +45,20 @@ jobs:
         run: mypy app tests
 
       - name: Test (pytest)
-        run: pytest -q
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=80 -q
+
+      - name: Dependency vulnerability audit
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.lock.txt
+
+      - name: Migration smoke test
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///./migration-smoke.db
+          AUTH_REQUIRED: "false"
+        run: |
+          alembic upgrade head
+          alembic downgrade base
 
   frontend:
     name: Frontend (tsc, eslint, vitest, build)
@@ -74,3 +87,8 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Dependency audit
+        # Known unpatched/transitively unreachable findings are documented in
+        # MEMORY.md; keep the report visible without pretending npm can fix them.
+        run: npm audit --audit-level=critical

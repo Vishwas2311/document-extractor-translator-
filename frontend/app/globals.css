@@ -858,8 +858,15 @@ button:focus-visible {
 .page-rotation-frame {
   position: relative;
   flex: 0 0 auto;
-  transform-origin: center;
-  transition: width 180ms ease, height 180ms ease, transform 220ms ease;
+  transition: width 180ms ease, height 180ms ease;
+}
+
+/* Rotated in place inside the frame; the frame itself keeps the rotated (visual)
+   dimensions so the layout box, scrolling, and centering match what is painted. */
+.page-rotation-inner {
+  position: relative;
+  transform-origin: top left;
+  transition: width 180ms ease, height 180ms ease;
 }
 
 .demo-sheet,
