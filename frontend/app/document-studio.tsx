@@ -13,6 +13,7 @@ import {
 import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
+  ApiError,
   checkHealth,
   checkHealthDependencies,
   checkSession,
@@ -2210,11 +2211,26 @@ export function DocumentStudio() {
         financial_reviewed_by: persisted.reviewer_subject,
         financial_reviewed_at: persisted.created_at,
       }));
+      // Guarded like every other async fetch in this file (see openDocument):
+      // if the reviewer navigates to a different document while this refetch
+      // is still in flight, activeRunRef.current will have moved on and this
+      // stale response must never overwrite what's now on screen.
+      activeRunRef.current?.abort();
+      const refreshController = new AbortController();
+      activeRunRef.current = refreshController;
       try {
-        const refreshed = await getDocument(document.id);
-        setDocument(refreshed);
+        const refreshed = await getDocument(document.id, {
+          signal: refreshController.signal,
+        });
+        if (activeRunRef.current === refreshController) {
+          setDocument(refreshed);
+        }
       } catch {
         // Keep the optimistic view; the next poll or reopen reconciles it.
+      } finally {
+        if (activeRunRef.current === refreshController) {
+          activeRunRef.current = null;
+        }
       }
       setInfo(
         decision === "approved"
@@ -2222,7 +2238,31 @@ export function DocumentStudio() {
           : "Financial result rejected and audit record saved.",
       );
     } catch (caught) {
-      await reportApiError(caught, "Financial review could not be saved.");
+      if (caught instanceof ApiError && caught.status === 409) {
+        activeRunRef.current?.abort();
+        const conflictController = new AbortController();
+        activeRunRef.current = conflictController;
+        try {
+          const refreshed = await getDocument(document.id, {
+            signal: conflictController.signal,
+          });
+          if (activeRunRef.current === conflictController) {
+            setDocument(refreshed);
+          }
+        } catch {
+          // If the refresh itself fails, fall through to the generic error below.
+        } finally {
+          if (activeRunRef.current === conflictController) {
+            activeRunRef.current = null;
+          }
+        }
+        setActionError(
+          "This document changed since you opened it, so your view was refreshed. " +
+            "Review the current result and try again.",
+        );
+      } else {
+        await reportApiError(caught, "Financial review could not be saved.");
+      }
     } finally {
       setFinancialReviewSubmitting(false);
     }
@@ -2368,11 +2408,26 @@ export function DocumentStudio() {
         translation_reviewed_by: persisted.reviewer_subject,
         translation_reviewed_at: persisted.created_at,
       }));
+      // Guarded like every other async fetch in this file (see openDocument):
+      // if the reviewer navigates to a different document while this refetch
+      // is still in flight, activeRunRef.current will have moved on and this
+      // stale response must never overwrite what's now on screen.
+      activeRunRef.current?.abort();
+      const refreshController = new AbortController();
+      activeRunRef.current = refreshController;
       try {
-        const refreshed = await getDocument(document.id);
-        setDocument(refreshed);
+        const refreshed = await getDocument(document.id, {
+          signal: refreshController.signal,
+        });
+        if (activeRunRef.current === refreshController) {
+          setDocument(refreshed);
+        }
       } catch {
         // Keep the optimistic view; the next poll or reopen reconciles it.
+      } finally {
+        if (activeRunRef.current === refreshController) {
+          activeRunRef.current = null;
+        }
       }
       setInfo(
         decision === "approved"
@@ -2380,7 +2435,31 @@ export function DocumentStudio() {
           : "Translation rejected and audit record saved.",
       );
     } catch (caught) {
-      await reportApiError(caught, "Translation review could not be saved.");
+      if (caught instanceof ApiError && caught.status === 409) {
+        activeRunRef.current?.abort();
+        const conflictController = new AbortController();
+        activeRunRef.current = conflictController;
+        try {
+          const refreshed = await getDocument(document.id, {
+            signal: conflictController.signal,
+          });
+          if (activeRunRef.current === conflictController) {
+            setDocument(refreshed);
+          }
+        } catch {
+          // If the refresh itself fails, fall through to the generic error below.
+        } finally {
+          if (activeRunRef.current === conflictController) {
+            activeRunRef.current = null;
+          }
+        }
+        setActionError(
+          "This document changed since you opened it, so your view was refreshed. " +
+            "Review the current result and try again.",
+        );
+      } else {
+        await reportApiError(caught, "Translation review could not be saved.");
+      }
     } finally {
       setTranslationReviewSubmitting(false);
     }
