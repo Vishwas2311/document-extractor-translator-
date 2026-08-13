@@ -98,6 +98,7 @@ class ProcessingService:
         di_dense_page_threshold: float = 0.65,
         translation_dedupe_identical: bool = True,
         translation_progress_flush_every: int = 4,
+        translation_id_mismatch_retries: int = 1,
         financial_selector: FinancialCandidateSelector | None = None,
         financial_extractor: FinancialExtractionService | None = None,
         table_integrity: TableIntegrityService | None = None,
@@ -123,6 +124,7 @@ class ProcessingService:
         self.di_dense_page_threshold = di_dense_page_threshold
         self.translation_dedupe_identical = translation_dedupe_identical
         self.translation_progress_flush_every = max(1, translation_progress_flush_every)
+        self.translation_id_mismatch_retries = max(0, translation_id_mismatch_retries)
         self.ocr_review_threshold = ocr_review_threshold
         self.worker_id = worker_id
         self.job_lease_seconds = job_lease_seconds
@@ -589,7 +591,48 @@ class ProcessingService:
                 translations=[merged_by_id[item.block_id] for item in inputs]
             )
         else:
-            response = await self.translator.translate(request)
+            # A structured-output response with mismatched block_ids is
+            # structurally valid (not a transport failure the SDK's own retry
+            # covers) but unusable for id-based lookup - bounded retry here,
+            # not inside translator.translate(), since only this layer has
+            # both the response and the expected `inputs` set needed to
+            # detect and react to a mismatch.
+            attempts = self.translation_id_mismatch_retries + 1
+            for attempt in range(1, attempts + 1):
+                response = await self.translator.translate(request)
+                try:
+                    # Only checking for the raised (whole-batch) ID-mismatch case
+                    # here - the real per-block `invalid` dict is computed once,
+                    # below, after this loop settles on a response, same as the
+                    # cached-response branch above already does.
+                    self.validator.validate(inputs, response)
+                except TranslationValidationError as exc:
+                    await logger.awarning(
+                        "translation_batch_id_mismatch",
+                        document_id=document_id,
+                        artifact=artifact,
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        missing_ids=exc.details.get("missing_ids"),
+                        extra_ids=exc.details.get("extra_ids"),
+                        duplicate_ids=exc.details.get("duplicate_ids"),
+                    )
+                    await self.storage.write_json(
+                        document_id,
+                        f"{artifact.removesuffix('.json')}.mismatch-{attempt}.json",
+                        {
+                            "input_hash": input_hash,
+                            "prompt_version": TRANSLATION_PROMPT_VERSION,
+                            "response": response.model_dump(mode="json"),
+                            "missing_ids": exc.details.get("missing_ids"),
+                            "extra_ids": exc.details.get("extra_ids"),
+                            "duplicate_ids": exc.details.get("duplicate_ids"),
+                        },
+                    )
+                    if attempt == attempts:
+                        raise
+                    continue
+                break
 
         invalid = self.validator.validate(inputs, response)
         await self.storage.write_json(

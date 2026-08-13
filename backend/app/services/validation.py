@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 
 from app.core.exceptions import TranslationValidationError
 from app.schemas.translation import TranslationBatchResponse, TranslationInput
@@ -35,10 +36,25 @@ class TranslationValidator:
             # Structured output guarantees a schema-valid response, not identical item
             # order - downstream consumption is by block_id (a dict lookup), so a
             # complete, correctly-translated response returned in a different order is
-            # not an error. sorted() (not set()) still catches a duplicate silently
-            # replacing a missing ID, which a set-equality check would miss.
+            # not an error. Counter (not set()) still catches a duplicate silently
+            # replacing a missing ID, which a set-equality check would miss, and lets
+            # the raised error report exactly which IDs were missing/extra/duplicated
+            # instead of just "they didn't match" - the raw model response that would
+            # otherwise explain a mismatch isn't kept around past this call.
+            expected_counts = Counter(expected_ids)
+            actual_counts = Counter(actual_ids)
+            missing_ids = sorted((expected_counts - actual_counts).elements())
+            extra_ids = sorted((actual_counts - expected_counts).elements())
+            duplicate_ids = sorted(
+                id_ for id_, count in actual_counts.items() if count > 1
+            )
             raise TranslationValidationError(
-                "Translation IDs did not match the input batch (missing, extra, or duplicate IDs)."
+                "Translation IDs did not match the input batch (missing, extra, or duplicate IDs).",
+                details={
+                    "missing_ids": missing_ids,
+                    "extra_ids": extra_ids,
+                    "duplicate_ids": duplicate_ids,
+                },
             )
         if len(set(actual_ids)) != len(actual_ids):
             raise TranslationValidationError("Translation response contained duplicate IDs.")

@@ -6,7 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core.enums import ProcessingProfile, TranslationStatus
-from app.core.exceptions import PolicyBlockedError
+from app.core.exceptions import PolicyBlockedError, TranslationValidationError
 from app.prompts.translation import TRANSLATION_PROMPT_VERSION
 from app.schemas.page import CanonicalDocument, PageMetadata, TableCell, TableResult, TextBlock
 from app.schemas.translation import (
@@ -623,6 +623,155 @@ async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -
     assert first.translation_status == TranslationStatus.FAILED
     assert second.translation_status == TranslationStatus.FAILED
     assert any("Translation failed" in warning for warning in first.warnings)
+
+
+class FailsIdMismatchOnceTranslator:
+    """Drops one requested block_id on the first call only; returns a complete,
+    correct response on every subsequent call - simulates the occasional-LLM-
+    sampling-noise case a bounded retry is meant to self-heal, as opposed to
+    MissingBlockIdTranslator's always-fails behavior above."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        self.calls += 1
+        blocks = request.blocks
+        if self.calls == 1:
+            blocks = [item for item in blocks if item.block_id != "b0002"]
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text="EN: " + item.source_text)
+                for item in blocks
+            ]
+        )
+
+
+async def test_id_mismatch_retry_recovers_the_batch() -> None:
+    """The bounded retry added for TranslationValidationError must recover a batch
+    whose first response had a transient ID mismatch, and must record a diagnostic
+    artifact for the failed attempt so a real occurrence is forensicable afterward -
+    unlike before, when the raw offending response was simply discarded."""
+    storage = MemoryStorage()
+    translator = FailsIdMismatchOnceTranslator()
+    service = _service(
+        storage=storage, translator=translator, translation_id_mismatch_retries=1
+    )
+    inputs = [
+        TranslationInput(block_id="b0001", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b0002", source_language="zh-Hans", source_text="青年支持"),
+    ]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+
+    response, invalid = await service._resolve_batch_translation(
+        "doc-6", artifact, "hash-1", request, inputs
+    )
+
+    assert invalid == {}
+    assert {item.block_id for item in response.translations} == {"b0001", "b0002"}
+    assert translator.calls == 2
+    # The failed first attempt's raw response was persisted as a diagnostic
+    # artifact instead of silently discarded.
+    assert "translations/batch-0001.mismatch-1.json" in storage.payloads
+    mismatch_artifact = storage.payloads["translations/batch-0001.mismatch-1.json"]
+    assert mismatch_artifact["missing_ids"] == ["b0002"]
+    # The final, successful attempt's response is what's stored under the real
+    # batch artifact path - not the failed one.
+    assert artifact in storage.payloads
+
+
+async def test_id_mismatch_retries_exhausted_still_fails_the_batch_terminally() -> None:
+    """With retries disabled (or exhausted), the batch must still fail exactly as it
+    did before this fix - the retry is a self-healing improvement, not a change to
+    the terminal fallback contract."""
+    storage = MemoryStorage()
+    translator = FailsIdMismatchOnceTranslator()
+    service = _service(
+        storage=storage, translator=translator, translation_id_mismatch_retries=0
+    )
+    inputs = [
+        TranslationInput(block_id="b0001", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b0002", source_language="zh-Hans", source_text="青年支持"),
+    ]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+
+    with pytest.raises(TranslationValidationError):
+        await service._resolve_batch_translation(
+            "doc-7", artifact, "hash-1", request, inputs
+        )
+
+    assert translator.calls == 1
+    assert "translations/batch-0001.mismatch-1.json" in storage.payloads
+    # No successful response was ever produced, so the real batch artifact path
+    # must not exist.
+    assert artifact not in storage.payloads
+
+
+class DropsOneBlockInASingleBatchTranslator:
+    """Faithfully translates every block except one specific block_id, which it
+    silently drops from its response whenever that block appears in a request -
+    simulating an ID mismatch confined to whichever single batch that block
+    happens to land in."""
+
+    def __init__(self, block_id_to_drop: str) -> None:
+        self.block_id_to_drop = block_id_to_drop
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text="EN: " + item.source_text)
+                for item in request.blocks
+                if item.block_id != self.block_id_to_drop
+            ]
+        )
+
+
+async def test_id_mismatch_blast_radius_stays_batch_scoped_at_realistic_scale() -> None:
+    """A 15-block document split into 3 batches of 5 (max_batch_blocks=5), where
+    only the middle batch's response drops one block_id, must fail only that
+    batch's blocks - the other two batches' blocks must translate normally. Proves
+    the "blast radius stays batch-scoped, not document-scoped" claim at a scale
+    closer to a real multi-batch document than the existing 1-batch/2-block tests."""
+    storage = MemoryStorage()
+    # Block 7 (1-indexed) lands in the second batch (blocks 6-10) given
+    # max_batch_blocks=5.
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0007")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=5,
+        translation_id_mismatch_retries=0,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 16)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-8",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    by_id = {block.block_id: block for block in document.blocks}
+    first_batch_ids = [f"b{index:04d}" for index in range(1, 6)]
+    second_batch_ids = [f"b{index:04d}" for index in range(6, 11)]
+    third_batch_ids = [f"b{index:04d}" for index in range(11, 16)]
+    for block_id in first_batch_ids + third_batch_ids:
+        assert by_id[block_id].translation_status == TranslationStatus.TRANSLATED, block_id
+    for block_id in second_batch_ids:
+        assert by_id[block_id].translation_status == TranslationStatus.FAILED, block_id
+    assert "translations/batch-0002.mismatch-1.json" in storage.payloads
+    assert "translations/batch-0001.mismatch-1.json" not in storage.payloads
+    assert "translations/batch-0003.mismatch-1.json" not in storage.payloads
 
 
 class ProtectedTokenDriftTranslator:

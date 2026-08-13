@@ -72,6 +72,58 @@ def test_rejects_missing_or_extra_ids() -> None:
         TranslationValidator().validate(inputs, response)
 
 
+def test_id_mismatch_error_reports_which_ids_were_missing() -> None:
+    # Regression: a mismatch used to raise with no diagnostic payload at all, so a
+    # real occurrence could never be root-caused after the fact - only "they didn't
+    # match" was known, not which IDs.
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b2", source_language="zh-Hans", source_text="你好"),
+        TranslationInput(block_id="b3", source_language="ja", source_text="こんにちは"),
+    ]
+    response = TranslationBatchResponse(
+        translations=[
+            TranslationItem(block_id="b1", translated_text="Welcome"),
+            TranslationItem(block_id="b3", translated_text="Hello"),
+        ]
+    )
+
+    with pytest.raises(TranslationValidationError) as excinfo:
+        TranslationValidator().validate(inputs, response)
+
+    assert excinfo.value.details == {
+        "missing_ids": ["b2"],
+        "extra_ids": [],
+        "duplicate_ids": [],
+    }
+
+
+def test_id_mismatch_error_reports_extra_and_duplicate_ids_separately() -> None:
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b2", source_language="zh-Hans", source_text="你好"),
+    ]
+    response = TranslationBatchResponse(
+        translations=[
+            TranslationItem(block_id="b1", translated_text="Welcome"),
+            TranslationItem(block_id="b1", translated_text="Welcome again"),
+            TranslationItem(block_id="b3", translated_text="Unexpected"),
+        ]
+    )
+
+    with pytest.raises(TranslationValidationError) as excinfo:
+        TranslationValidator().validate(inputs, response)
+
+    # Counter-based diffing reports b1's extra copy as both "extra" (its count
+    # exceeds what was expected) and "duplicate" (it appears more than once) -
+    # these aren't mutually exclusive categories, by design.
+    assert excinfo.value.details == {
+        "missing_ids": ["b2"],
+        "extra_ids": ["b1", "b3"],
+        "duplicate_ids": ["b1"],
+    }
+
+
 def test_rejects_duplicate_ids_replacing_a_missing_one() -> None:
     # A plain set(actual) != set(expected) comparison would miss this: {"b1"} == {"b1"}
     # even though b2's translation is silently missing and b1 is duplicated instead.
