@@ -53,7 +53,15 @@ from app.schemas.translation_review import (
     TranslationReviewRecord,
 )
 from app.services.audit import AuditService
-from app.services.financial import financial_result_sha256
+from app.services.financial import (
+    REVIEWED_FINANCIAL_CSV_PATH,
+    REVIEWED_FINANCIAL_JSON_PATH,
+    REVIEWED_FINANCIAL_XLSX_PATH,
+    apply_financial_corrections,
+    financial_result_csv,
+    financial_result_sha256,
+    financial_result_xlsx,
+)
 from app.services.translation_review import (
     REVIEWED_BILINGUAL_PATH,
     TRANSLATION_REVIEW_SCHEMA_VERSION,
@@ -601,6 +609,21 @@ async def create_financial_review(
             created_at=now,
         )
     )
+    # Materialize the reviewed exports only after the review record committed,
+    # and only for approvals. A failed or rejected review must leave no
+    # reviewed-financial artifacts behind. Each write is atomic (temp file +
+    # rename), so readers never observe a partial file.
+    if review.decision == "approved":
+        reviewed_result = apply_financial_corrections(result, review.corrections)
+        await services.storage.write_json(
+            document_id, REVIEWED_FINANCIAL_JSON_PATH, reviewed_result.model_dump(mode="json")
+        )
+        await services.storage.write_text(
+            document_id, REVIEWED_FINANCIAL_CSV_PATH, financial_result_csv(reviewed_result)
+        )
+        await services.storage.write_bytes(
+            document_id, REVIEWED_FINANCIAL_XLSX_PATH, financial_result_xlsx(reviewed_result)
+        )
     await _record_audit(
         request,
         action=f"financial.review.{review.decision}",
@@ -821,15 +844,50 @@ async def download_artifact(
     elif artifact == "financial-validation":
         relative = "validation/financial.json"
         filename = f"{Path(document.original_filename).stem}-financial-validation.json"
+    elif artifact == "reviewed-financial":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_JSON_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.json"
+    elif artifact == "reviewed-financial-csv":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_CSV_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.csv"
+    elif artifact == "reviewed-financial-xlsx":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_XLSX_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.xlsx"
     else:
         raise DocumentNotFoundError("Download artifact was not found.")
-    if artifact in {"manifest", "reviewed-bilingual"}:
+    # These artifacts are materialized after processing completes (review-gated,
+    # written eagerly on approval), so they're never in manifest.json's
+    # artifacts list from the original processing job - they're served directly
+    # off disk instead of going through the declared-artifacts check below.
+    if artifact in {
+        "manifest",
+        "reviewed-bilingual",
+        "reviewed-financial",
+        "reviewed-financial-csv",
+        "reviewed-financial-xlsx",
+    }:
         target = services.storage.artifact_path(document_id, relative)
         if not target.exists():
             raise DocumentNotFoundError("Download artifact was not found.")
+        media_type = {
+            ".csv": "text/csv; charset=utf-8",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }.get(target.suffix.lower(), "application/json")
         response = FileResponse(
             target,
-            media_type="application/json",
+            media_type=media_type,
             filename=filename,
             headers=NO_STORE,
         )

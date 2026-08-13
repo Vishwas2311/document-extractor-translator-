@@ -2103,7 +2103,12 @@ export function DocumentStudio() {
   }
 
   async function handleDownload(
-    artifact: "reviewed-bilingual" | "financial" | "financial-xlsx",
+    artifact:
+      | "reviewed-bilingual"
+      | "financial"
+      | "financial-xlsx"
+      | "reviewed-financial"
+      | "reviewed-financial-xlsx",
   ) {
     if (downloadingArtifact) return;
     setActionError(null);
@@ -2503,6 +2508,20 @@ export function DocumentStudio() {
           ) : null}
           <button className="secondary-button" disabled={!financialResult || !!downloadingArtifact} onClick={() => void handleDownload("financial")}><Icon name="download" /> Financial JSON</button>
           <button className="secondary-button" disabled={!financialResult || !!downloadingArtifact} onClick={() => void handleDownload("financial-xlsx")}><Icon name="download" /> XLSX</button>
+          <button
+            className="secondary-button export-button"
+            disabled={document.demo || document.financial_review_status !== "approved" || !!downloadingArtifact}
+            onClick={() => void handleDownload("reviewed-financial")}
+          >
+            <Icon name="download" /> Approved financial
+          </button>
+          <button
+            className="secondary-button export-button"
+            disabled={document.demo || document.financial_review_status !== "approved" || !!downloadingArtifact}
+            onClick={() => void handleDownload("reviewed-financial-xlsx")}
+          >
+            <Icon name="download" /> Approved financial XLSX
+          </button>
           <button
             className="secondary-button export-button"
             disabled={document.demo || document.document_review_status !== "approved" || !!downloadingArtifact}

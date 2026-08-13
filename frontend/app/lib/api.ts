@@ -515,7 +515,10 @@ export function downloadUrl(
     | "financial"
     | "financial-csv"
     | "financial-xlsx"
-    | "financial-validation",
+    | "financial-validation"
+    | "reviewed-financial"
+    | "reviewed-financial-csv"
+    | "reviewed-financial-xlsx",
   pageNumber?: number,
 ): string {
   const query = artifact === "page" && pageNumber ? "?page=" + pageNumber : "";
@@ -546,7 +549,10 @@ export async function downloadArtifact(
     | "financial"
     | "financial-csv"
     | "financial-xlsx"
-    | "financial-validation",
+    | "financial-validation"
+    | "reviewed-financial"
+    | "reviewed-financial-csv"
+    | "reviewed-financial-xlsx",
   pageNumber?: number,
   options?: RequestOptions,
 ): Promise<void> {

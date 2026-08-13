@@ -11,11 +11,13 @@ from io import BytesIO, StringIO
 from typing import Literal
 
 from app.core.enums import FinancialPageDisposition
+from app.core.exceptions import InvalidDocumentError
 from app.schemas.financial import (
     FinancialCell,
     FinancialClassificationEvidence,
     FinancialClassificationResult,
     FinancialContentItem,
+    FinancialCorrection,
     FinancialPageClassification,
     FinancialResult,
     FinancialTable,
@@ -411,6 +413,41 @@ def financial_result_xlsx(result: FinancialResult) -> bytes:
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+REVIEWED_FINANCIAL_JSON_PATH = "exports/reviewed-financial-document.json"
+REVIEWED_FINANCIAL_CSV_PATH = "exports/reviewed-financial-document.csv"
+REVIEWED_FINANCIAL_XLSX_PATH = "exports/reviewed-financial-document.xlsx"
+
+
+def apply_financial_corrections(
+    result: FinancialResult,
+    corrections: list[FinancialCorrection],
+) -> FinancialResult:
+    """Return a deep-copied result with reviewer corrections applied to cell values.
+
+    Structure decisions (accept/reject a reconstructed table) are validated as an
+    approval gate elsewhere but never mutate the result: the reconstructed
+    structure is already what create_financial_review read and validated against,
+    so "accepted" is permission to use it, not a data transform. Only cell-level
+    normalized_value/currency corrections change the exported result.
+    """
+    reviewed = result.model_copy(deep=True)
+    cells: dict[str, FinancialCell] = {
+        cell.cell_id: cell for table in reviewed.tables for cell in table.cells
+    }
+    for correction in corrections:
+        cell = cells.get(correction.cell_id)
+        if cell is None:
+            raise InvalidDocumentError(f"Unknown financial cell id: {correction.cell_id}")
+        if correction.normalized_value is not None:
+            cell.value.normalized_value = correction.normalized_value
+            cell.value.requires_normalized_correction = False
+        if correction.currency is not None:
+            cell.value.currency = correction.currency
+            cell.value.requires_currency_correction = False
+        cell.warnings = [*cell.warnings, f"Reviewer correction: {correction.reason}"]
+    return reviewed
 
 
 def selected_page_ranges(page_numbers: list[int], maximum_span: int) -> list[tuple[int, int]]:
