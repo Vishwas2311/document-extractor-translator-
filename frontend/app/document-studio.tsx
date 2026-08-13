@@ -466,8 +466,15 @@ function displayLanguage(language: string) {
   }
 }
 
-function translationStatusCopy(status: TranslationStatus, warnings?: string[] | null): string {
-  const reason = warnings && warnings.length ? warnings[warnings.length - 1] : undefined;
+export function translationStatusCopy(
+  status: TranslationStatus,
+  warnings?: string[] | null,
+): string {
+  const rawReason = warnings && warnings.length ? warnings[warnings.length - 1] : undefined;
+  // The backend may already prefix a failure warning with "Translation failed: "
+  // (see processing.py) - strip a redundant existing prefix before re-adding it
+  // below so the label is correct either way, instead of doubling up.
+  const reason = rawReason?.replace(/^translation failed:\s*/i, "");
   switch (status) {
     case "not_required":
       return "No translatable text in this region.";
