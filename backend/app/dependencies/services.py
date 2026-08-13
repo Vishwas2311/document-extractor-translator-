@@ -110,6 +110,7 @@ async def create_container(settings: Settings) -> ServiceContainer:
         repository,
         concurrency=settings.processing_concurrency,
         recovery_sweep_seconds=settings.recovery_sweep_seconds,
+        idempotency_reservation_max_age_seconds=settings.idempotency_reservation_max_age_seconds,
     )
     container = ServiceContainer(
         settings=settings,

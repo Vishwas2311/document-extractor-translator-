@@ -22,8 +22,13 @@ class SlowProcessing:
 class FakeRepo:
     def __init__(self, status: str = DocumentStatus.QUEUED.value) -> None:
         self.status = status
+        self.idempotency_sweep_calls: list[int] = []
 
     async def clear_stale_leases(self) -> int:
+        return 0
+
+    async def clear_stale_idempotency_reservations(self, *, max_age_seconds: int) -> int:
+        self.idempotency_sweep_calls.append(max_age_seconds)
         return 0
 
     async def recoverable_document_ids(self) -> list[str]:
@@ -31,6 +36,26 @@ class FakeRepo:
 
     async def get(self, document_id: str) -> SimpleNamespace:
         return SimpleNamespace(id=document_id, status=self.status)
+
+
+async def test_start_sweeps_stale_idempotency_reservations() -> None:
+    """Regression: reserve_idempotency's in-flight rows were never reclaimed
+    after a crash/restart, permanently 409ing any retry with that key. The
+    sweep must run at startup, mirroring the existing stale-lease sweep."""
+    processing = SlowProcessing()
+    repo = FakeRepo()
+    runner = InProcessJobRunner(
+        processing,
+        repo,
+        concurrency=1,
+        recovery_sweep_seconds=60,
+        idempotency_reservation_max_age_seconds=1800,
+    )
+
+    await runner.start()
+
+    assert repo.idempotency_sweep_calls == [1800]
+    await runner.stop()
 
 
 async def test_enqueue_while_active_is_deferred_then_flushed() -> None:

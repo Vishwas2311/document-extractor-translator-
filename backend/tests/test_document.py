@@ -1,3 +1,4 @@
+import asyncio
 import io
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +80,29 @@ class RetryRepository:
 
     async def update_document(self, document_id: str, **values: object) -> None:
         self.document_updates.append({"document_id": document_id, **values})
+
+    async def mark_retriable_document_failed(
+        self,
+        document_id: str,
+        *,
+        error_code: str,
+        safe_error_message: str,
+        completed_at: object,
+    ) -> bool:
+        if self.status not in {"failed", "needs_review", "cancelled"}:
+            return False
+        self.status = "failed"
+        self.document_updates.append(
+            {
+                "document_id": document_id,
+                "status": "failed",
+                "current_stage": "failed",
+                "error_code": error_code,
+                "safe_error_message": safe_error_message,
+                "completed_at": completed_at,
+            }
+        )
+        return True
 
     async def finish_processing(
         self,
@@ -214,6 +238,67 @@ async def test_reprocess_cleanup_failure_marks_document_failed_without_a_queued_
     failure = repository.document_updates[-1]
     assert failure["status"] == "failed"
     assert failure["error_code"] == "reprocess_cleanup_failed"
+
+
+async def test_concurrent_reprocess_calls_do_not_race_cleanup(tmp_path: Path) -> None:
+    """Regression: two overlapping reprocess requests used to race
+    shutil.rmtree against each other with no lock, and a losing request's
+    failure handler could stomp a document a winning request already moved
+    past retriable. The per-document lock must fully serialize cleanup, and
+    the loser must see the winner's status change and cleanly conflict
+    instead of re-running cleanup or overwriting the winner's progress."""
+    document_id = "doc-concurrent-reprocess"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    await storage.write_json(document_id, "manifest.json", {"stale": True})
+
+    concurrent_count = 0
+    max_concurrent = 0
+
+    class SlowCleanupStorage:
+        def __getattr__(self, name: str) -> object:
+            return getattr(storage, name)
+
+        async def delete_artifact(self, document_id: str, relative_path: str) -> None:
+            nonlocal concurrent_count, max_concurrent
+            concurrent_count += 1
+            max_concurrent = max(max_concurrent, concurrent_count)
+            await asyncio.sleep(0.05)
+            concurrent_count -= 1
+            await storage.delete_artifact(document_id, relative_path)
+
+    class StatusAdvancingRepository(RetryRepository):
+        async def create_retry_job(
+            self, document_id: str, *, mode: RetryMode
+        ) -> SimpleNamespace:
+            # Mirror the real repository: a successful create_retry_job moves
+            # the document out of the retriable set.
+            self.status = "queued"
+            return await super().create_retry_job(document_id, mode=mode)
+
+    repository = StatusAdvancingRepository(status="failed")
+    service = DocumentService(
+        Settings(auth_required=False),
+        repository,  # type: ignore[arg-type]
+        SlowCleanupStorage(),  # type: ignore[arg-type]
+    )
+
+    results = await asyncio.gather(
+        service.retry(document_id, mode=RetryMode.REPROCESS),
+        service.retry(document_id, mode=RetryMode.REPROCESS),
+        return_exceptions=True,
+    )
+
+    # The lock must have prevented both cleanups from running at once.
+    assert max_concurrent == 1
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    conflicts = [r for r in results if isinstance(r, ConflictError)]
+    assert len(successes) == 1
+    assert len(conflicts) == 1
+    # Only the winner's job was created; the loser never re-ran cleanup or
+    # overwrote the winner's now-queued status.
+    assert repository.created_jobs == 1
+    assert repository.status == "queued"
 
 
 async def test_reprocess_refuses_a_document_that_is_still_processing(

@@ -205,6 +205,30 @@ class DocumentRepository:
             )
             await session.commit()
 
+    async def clear_stale_idempotency_reservations(self, *, max_age_seconds: int) -> int:
+        """Reclaim reservations orphaned by a crash/restart between
+        reserve_idempotency and complete_idempotency/release_idempotency.
+
+        Mirrors clear_stale_leases: an in-flight (response_status=0)
+        reservation older than max_age_seconds could not still belong to a
+        live request (a legitimate one always completes or releases well
+        within that window), so it's safe to delete and let a future retry
+        with the same key re-reserve cleanly.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
+        async with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    delete(IdempotencyRecord).where(
+                        IdempotencyRecord.response_status == 0,
+                        IdempotencyRecord.created_at < cutoff,
+                    )
+                ),
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def list_audit_events(
         self,
         *,
@@ -258,6 +282,49 @@ class DocumentRepository:
             if result.rowcount == 0:
                 raise DocumentNotFoundError("Document was not found.")
             await session.commit()
+
+    async def mark_retriable_document_failed(
+        self,
+        document_id: str,
+        *,
+        error_code: str,
+        safe_error_message: str,
+        completed_at: datetime,
+    ) -> bool:
+        """Mark a document failed only while it's still in a retriable status.
+
+        Used when reprocess/retranslate cleanup raises before any new job
+        exists (so there is no job_id to guard by, unlike
+        update_active_document). Guarding by status instead - mirroring
+        create_retry_job's own atomic guard - means a losing request in a
+        concurrent-retry race can never overwrite a document a *different*,
+        already-winning request has since moved past retriable (e.g. to
+        queued or further). Returns False (no-op) when that's already
+        happened, rather than raising - losing this race is an expected,
+        harmless outcome, not an error.
+        """
+        retriable = [status.value for status in RETRIABLE_DOCUMENT_STATUSES]
+        async with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(Document)
+                    .where(
+                        Document.id == document_id,
+                        Document.status.in_(retriable),
+                    )
+                    .values(
+                        status=DocumentStatus.FAILED.value,
+                        current_stage=DocumentStatus.FAILED.value,
+                        error_code=error_code,
+                        safe_error_message=safe_error_message,
+                        completed_at=completed_at,
+                        updated_at=datetime.now(UTC),
+                    )
+                ),
+            )
+            await session.commit()
+            return bool(result.rowcount)
 
     async def _latest_job_locked(self, session: AsyncSession, document_id: str) -> ProcessingJob:
         job = await session.scalar(

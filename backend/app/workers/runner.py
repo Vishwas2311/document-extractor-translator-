@@ -21,6 +21,8 @@ class DocumentState(Protocol):
 class RunnerRepository(Protocol):
     async def clear_stale_leases(self) -> int: ...
 
+    async def clear_stale_idempotency_reservations(self, *, max_age_seconds: int) -> int: ...
+
     async def recoverable_document_ids(self) -> Sequence[str]: ...
 
     async def get(self, document_id: str) -> DocumentState: ...
@@ -33,11 +35,15 @@ class InProcessJobRunner:
         repository: RunnerRepository,
         concurrency: int = 1,
         recovery_sweep_seconds: int = 60,
+        idempotency_reservation_max_age_seconds: int = 3600,
     ) -> None:
         self.processing_service = processing_service
         self.repository = repository
         self.concurrency = max(1, concurrency)
         self.recovery_sweep_seconds = max(15, recovery_sweep_seconds)
+        self.idempotency_reservation_max_age_seconds = max(
+            60, idempotency_reservation_max_age_seconds
+        )
         self.queue: asyncio.Queue[str | None] = asyncio.Queue()
         self.tasks: list[asyncio.Task[None]] = []
         self.enqueued: set[str] = set()
@@ -54,10 +60,18 @@ class InProcessJobRunner:
     def pending_count(self) -> int:
         return max(0, self.queue.qsize()) + len(self.pending_requeue)
 
+    async def _sweep_idempotency_reservations(self) -> None:
+        cleared = await self.repository.clear_stale_idempotency_reservations(
+            max_age_seconds=self.idempotency_reservation_max_age_seconds
+        )
+        if cleared:
+            await logger.ainfo("stale_idempotency_reservations_cleared", count=cleared)
+
     async def start(self) -> None:
         cleared = await self.repository.clear_stale_leases()
         if cleared:
             await logger.ainfo("stale_leases_cleared", count=cleared)
+        await self._sweep_idempotency_reservations()
         self.tasks = [
             asyncio.create_task(self._worker(index), name=f"document-worker-{index}")
             for index in range(self.concurrency)
@@ -96,6 +110,7 @@ class InProcessJobRunner:
             try:
                 await asyncio.sleep(self.recovery_sweep_seconds)
                 await self.repository.clear_stale_leases()
+                await self._sweep_idempotency_reservations()
                 for document_id in await self.repository.recoverable_document_ids():
                     await self.enqueue(document_id)
             except asyncio.CancelledError:

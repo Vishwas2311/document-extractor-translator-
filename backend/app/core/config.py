@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 900
     job_heartbeat_seconds: int = 30
     recovery_sweep_seconds: int = 60
+    # Generous on purpose: the in-flight window covers the full upload request
+    # (streaming up to max_upload_size_mb plus validation), and the frontend's
+    # own upload timeout runs up to 30 minutes - a short TTL risks reclaiming a
+    # still-legitimately-in-flight reservation and letting a retry create a
+    # duplicate document mid-upload.
+    idempotency_reservation_max_age_seconds: int = 3600
 
     log_level: str = "INFO"
     log_format: str = "json"
