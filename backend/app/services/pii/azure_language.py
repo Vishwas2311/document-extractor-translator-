@@ -15,12 +15,38 @@ keep the SDK-specific mapping isolated.
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Awaitable, Callable, Sequence
 
 from app.core.exceptions import PolicyBlockedError
 from app.services.pii.base import PiiSpan
 
 Recognizer = Callable[[list[dict[str, str]]], Awaitable[list[list[PiiSpan]]]]
+
+
+def utf16_code_unit_offsets(text: str) -> list[int]:
+    """``offsets[i]`` is the UTF-16 code-unit position of Python (code-point)
+    index ``i``; ``offsets[len(text)]`` is the text's total UTF-16 length.
+
+    Azure AI Language reports entity offsets/lengths as UTF-16 code units,
+    not Python string indices - identical for any text without astral-plane
+    characters (the two only diverge once a character needs a UTF-16
+    surrogate pair, i.e. ``ord(ch) > 0xFFFF``), but silently wrong for text
+    containing rare emoji or CJK extension characters otherwise.
+    """
+    offsets = [0] * (len(text) + 1)
+    position = 0
+    for index, character in enumerate(text):
+        offsets[index] = position
+        position += 2 if ord(character) > 0xFFFF else 1
+    offsets[len(text)] = position
+    return offsets
+
+
+def utf16_offset_to_python_index(offsets: list[int], utf16_offset: int) -> int:
+    """Convert a UTF-16 code-unit offset (from ``utf16_code_unit_offsets``)
+    back into the Python string index at that position."""
+    return bisect.bisect_left(offsets, utf16_offset)
 
 
 class AzureLanguagePiiDetector:
@@ -86,23 +112,29 @@ class AzureLanguagePiiDetector:
             ) from exc
 
         credential = self._credential()
-        # NOTE: Azure returns entity offsets as UTF-16 code units. For the Latin
-        # and CJK text this system handles they align with Python indices; text
-        # containing astral-plane characters (rare emoji) would need remapping.
+        # Azure returns entity offsets/lengths as UTF-16 code units - convert
+        # to Python string indices (see utf16_code_unit_offsets) so downstream
+        # slicing of the same Python `text` string (security_gateway.py) lands
+        # on the correct characters even when astral-plane characters (rare
+        # emoji, some CJK extensions) precede an entity.
+        text_by_index = [document["text"] for document in documents]
         async with TextAnalyticsClient(self._endpoint, credential) as client:
             response = await client.recognize_pii_entities(documents)
             spans_by_doc: list[list[PiiSpan]] = []
-            for document in response:
+            for doc_index, document in enumerate(response):
                 if getattr(document, "is_error", False):
                     raise PolicyBlockedError(
                         "Azure AI Language reported an error for a document. Failing closed.",
                         details={"service": "azure_language"},
                     )
+                offsets = utf16_code_unit_offsets(text_by_index[doc_index])
                 spans_by_doc.append(
                     [
                         PiiSpan(
-                            start=entity.offset,
-                            end=entity.offset + entity.length,
+                            start=utf16_offset_to_python_index(offsets, entity.offset),
+                            end=utf16_offset_to_python_index(
+                                offsets, entity.offset + entity.length
+                            ),
                             category=str(entity.category),
                         )
                         for entity in document.entities

@@ -8,6 +8,10 @@ from app.services.pii import (
     RegexPiiDetector,
     build_pii_detector,
 )
+from app.services.pii.azure_language import (
+    utf16_code_unit_offsets,
+    utf16_offset_to_python_index,
+)
 from app.services.pii.base import PiiSpan, dedupe_overlaps
 
 
@@ -85,6 +89,38 @@ def test_dedupe_overlaps_nested_span_is_fully_covered() -> None:
     kept = dedupe_overlaps(spans)
     assert [(s.start, s.end) for s in kept] == [(4, 40)]
     assert kept[0].category == "url"
+
+
+def test_utf16_offsets_match_python_indices_for_bmp_only_text() -> None:
+    # For text without astral-plane characters, UTF-16 code-unit offsets and
+    # Python string indices are numerically identical at every position.
+    text = "call 5551234567 re: 张伟's account"
+    offsets = utf16_code_unit_offsets(text)
+    assert offsets == list(range(len(text) + 1))
+    for i in range(len(text) + 1):
+        assert utf16_offset_to_python_index(offsets, i) == i
+
+
+def test_utf16_offset_to_python_index_corrects_for_astral_plane_characters() -> None:
+    # Regression: Azure AI Language reports offsets as UTF-16 code units. A
+    # non-BMP character (like this emoji) occupies one Python index but two
+    # UTF-16 code units, so a naive index (using the raw Azure offset
+    # directly) would land one character early for everything after it.
+    text = "\U0001F600 call Jane Doe now"
+    target = "Jane Doe"
+    python_index = text.index(target)
+    # The emoji is 1 Python char but 2 UTF-16 code units, so Azure's reported
+    # UTF-16 offset for `target` is one greater than its Python index.
+    utf16_offset = python_index + 1
+
+    offsets = utf16_code_unit_offsets(text)
+    recovered_index = utf16_offset_to_python_index(offsets, utf16_offset)
+
+    assert recovered_index == python_index
+    assert text[recovered_index : recovered_index + len(target)] == target
+    # A naive (unconverted) use of the raw UTF-16 offset would have sliced
+    # one character short of the real target - proving the bug this guards.
+    assert text[utf16_offset : utf16_offset + len(target)] != target
 
 
 async def test_azure_detector_fails_closed_without_endpoint() -> None:
