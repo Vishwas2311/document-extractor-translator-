@@ -110,11 +110,7 @@ async def test_translation_retry_wait_ignores_missing_outcome() -> None:
     assert 0 <= result <= 20
 
 
-def test_get_client_rejects_unimplemented_managed_identity_mode() -> None:
-    # azure_openai_configured (config.py) treats managed_identity as valid with no
-    # api_key required, but there's no AAD/managed-identity credential wiring here -
-    # only the api_key path is implemented. Selecting managed_identity must fail
-    # with an explicit, honest error instead of a confusing generic one.
+def test_get_client_constructs_managed_identity_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         azure_auth_mode="managed_identity",
         azure_openai_base_url="https://example.test/openai/v1",
@@ -122,8 +118,12 @@ def test_get_client_rejects_unimplemented_managed_identity_mode() -> None:
     )
     translator = AzureOpenAITranslator(settings)
 
-    with pytest.raises(ConfigurationError, match="managed_identity"):
-        translator._get_client()
+    class Credential:
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("azure.identity.aio.DefaultAzureCredential", Credential)
+    assert translator._get_client() is not None
 
 
 def test_get_client_succeeds_with_api_key_mode_configured() -> None:

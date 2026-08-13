@@ -13,7 +13,9 @@ import {
 import { demoDocument, demoPages } from "./demo-data";
 import {
   API_BASE,
+  ApiError,
   checkHealth,
+  checkHealthDependencies,
   checkSession,
   cancelDocument,
   createFinancialReview,
@@ -43,6 +45,7 @@ import type {
   FinancialContentItem,
   FinancialResult,
   FinancialReviewRecord,
+  HealthDependencies,
   HealthStatus,
   PageResult,
   PageSummary,
@@ -263,15 +266,17 @@ function wait(milliseconds: number, signal?: AbortSignal): Promise<void> {
       reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
       return;
     }
-    const timeoutId = window.setTimeout(resolve, milliseconds);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timeoutId);
-        reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      window.clearTimeout(timeoutId);
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    // Detach the abort handler when the timer fires normally - a long-lived signal
+    // (one per poll loop) would otherwise accumulate one dead listener per iteration.
+    const timeoutId = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -1155,7 +1160,10 @@ export function DocumentStudio() {
   const [pageCache, setPageCache] = useState<Record<number, PageResult>>({});
   const [pageLoadError, setPageLoadError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [activeTab, setActiveTab] = useState<InspectorTab>("financial");
+  // The built-in demo has no financial extraction stream, so its inspector opens on
+  // the Page view (this is also what the server-rendered shell shows). Real documents
+  // switch to the Financial view once, when they are uploaded or opened.
+  const [activeTab, setActiveTab] = useState<InspectorTab>("page");
   const [selectedId, setSelectedId] = useState<string | null>(demoPages[0].blocks[0].block_id);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0.82);
@@ -1165,6 +1173,7 @@ export function DocumentStudio() {
   const [info, setInfo] = useState<string | null>(null);
   const [sourceViewport, setSourceViewport] = useState<{ width: number; height: number } | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [healthDependencies, setHealthDependencies] = useState<HealthDependencies | null>(null);
   const [sourceBlobUrl, setSourceBlobUrl] = useState<string | null>(null);
   const [isDocumentListOpen, setIsDocumentListOpen] = useState(false);
   const [documentList, setDocumentList] = useState<DocumentSummary[]>([]);
@@ -1178,6 +1187,13 @@ export function DocumentStudio() {
   const studioBodyRef = useRef<HTMLDivElement>(null);
   const hoverScrollFrameRef = useRef<number | null>(null);
   const activeRunRef = useRef<AbortController | null>(null);
+  // Mirrors pageView for long-lived async loops (upload/poll closures capture the
+  // render-time value otherwise, and would keep refreshing a stale filter).
+  const pageViewRef = useRef<PageView>(pageView);
+  pageViewRef.current = pageView;
+  // Monotonic sequence for page-summary requests so a slow, stale response can
+  // never overwrite the result of a newer request (last-write-wins race).
+  const summariesRequestSeqRef = useRef(0);
 
   const measuredInspectorWidth = useCallback(() => {
     if (inspectorWidth !== null) return inspectorWidth;
@@ -1294,6 +1310,9 @@ export function DocumentStudio() {
     checkHealth({ signal: controller.signal })
       .then((result) => setHealth(result))
       .catch(() => undefined);
+    checkHealthDependencies({ signal: controller.signal })
+      .then((result) => setHealthDependencies(result))
+      .catch(() => undefined);
     checkSession({ signal: controller.signal })
       .then((result) => setSession(result))
       .catch(() => undefined);
@@ -1349,21 +1368,36 @@ export function DocumentStudio() {
   const canPreviewSource = canPreviewPdf || canPreviewImage;
   const viewerPageCount = pageCount || (canPreviewSource ? 1 : 0);
   const pageUnit = page?.page.unit ?? "inch";
+  // sourceViewport stores the source's natural CSS size (zoom = 1), so the frame
+  // math stays correct when the zoom changes without a fresh preview measurement.
   const canvasWidth = page
     ? dimensionToCssPixels(page.page.width, pageUnit, zoom)
-    : sourceViewport?.width ?? dimensionToCssPixels(8.5, "inch", zoom);
+    : sourceViewport
+      ? sourceViewport.width * zoom
+      : dimensionToCssPixels(8.5, "inch", zoom);
   const canvasHeight = page
     ? dimensionToCssPixels(page.page.height, pageUnit, zoom)
-    : sourceViewport?.height ?? dimensionToCssPixels(11, "inch", zoom);
+    : sourceViewport
+      ? sourceViewport.height * zoom
+      : dimensionToCssPixels(11, "inch", zoom);
 
-  const diConfigured = Boolean(health?.azure_configured.document_intelligence);
+  const diConfigured = Boolean(healthDependencies?.document_intelligence.configured);
   const openaiConfigured = Boolean(
-    health?.azure_configured.openai && (health.openai_deployment_configured ?? true),
+    healthDependencies?.azure_openai.configured && healthDependencies.azure_openai.deployment,
   );
 
   const handleSourceReady = useCallback((width: number, height: number) => {
     setSourceViewport({ width, height });
   }, []);
+
+  // PdfPage reports its rendered viewport at the current zoom; normalize back to
+  // natural (zoom = 1) dimensions before storing them in sourceViewport.
+  const handlePdfSourceReady = useCallback(
+    (width: number, height: number) => {
+      setSourceViewport({ width: width / zoom, height: height / zoom });
+    },
+    [zoom],
+  );
 
   const standaloneBlocks = useMemo(
     () => (page ? standaloneBlocksForPage(page) : []),
@@ -1623,12 +1657,12 @@ export function DocumentStudio() {
     const baseWidth = page
       ? dimensionToCssPixels(page.page.width, page.page.unit, 1)
       : sourceViewport
-        ? sourceViewport.width / zoom
+        ? sourceViewport.width
         : dimensionToCssPixels(8.5, "inch", 1);
     const baseHeight = page
       ? dimensionToCssPixels(page.page.height, page.page.unit, 1)
       : sourceViewport
-        ? sourceViewport.height / zoom
+        ? sourceViewport.height
         : dimensionToCssPixels(11, "inch", 1);
     const rotated = rotation % 180 !== 0;
     const visualWidth = rotated ? baseHeight : baseWidth;
@@ -1702,18 +1736,21 @@ export function DocumentStudio() {
     nextDocument: DocumentDetail,
     signal?: AbortSignal,
     options?: { preservePage?: boolean; keepCache?: boolean },
-    requestedView: PageView = pageView,
+    requestedView?: PageView,
   ) {
     const count = nextDocument.page_count ?? nextDocument.pages_ready ?? 0;
     if (!count) return;
+    // Read the view from the ref so poll-loop refreshes always use the filter the
+    // user currently has selected, not the one captured when the loop started.
+    const view = requestedView ?? pageViewRef.current;
+    const requestSeq = ++summariesRequestSeqRef.current;
     const summaries = await listPageSummaries(
       nextDocument.id,
       { signal },
-      requestedView,
+      view,
     );
-    if (signal?.aborted) return;
+    if (signal?.aborted || requestSeq !== summariesRequestSeqRef.current) return;
     setPageSummaries(summaries);
-    setActiveTab("financial");
     if (isTerminal(nextDocument.status)) {
       try {
         const result = await getFinancialResult(nextDocument.id, { signal });
@@ -1734,12 +1771,13 @@ export function DocumentStudio() {
         if (!signal?.aborted) setTranslationReviews([]);
       }
     }
+    if (signal?.aborted || requestSeq !== summariesRequestSeqRef.current) return;
     if (!options?.keepCache) {
       setPageCache({});
     }
     if (!options?.preservePage) {
       const firstPage =
-        requestedView === "financial"
+        view === "financial"
           ? summaries.find((item) => item.financial_selected)?.page_number
           : summaries[0]?.page_number;
       setCurrentPage(firstPage ?? 1);
@@ -1847,9 +1885,11 @@ export function DocumentStudio() {
     const controller = new AbortController();
     activeRunRef.current = controller;
     setBusy(true);
+    let createdDocumentId: string | null = null;
     try {
       const created = await uploadDocument(file, { signal: controller.signal });
       if (controller.signal.aborted) return;
+      createdDocumentId = created.document_id;
       setDocument({
         id: created.document_id,
         original_filename: file.name,
@@ -1865,11 +1905,18 @@ export function DocumentStudio() {
         data_class: created.data_class ?? null,
       });
       resetPageState();
+      setActiveTab("financial");
       await followJob(created.document_id, controller.signal);
     } catch (caught) {
       if (controller.signal.aborted) return;
+      // Once the upload has created a document, a monitoring failure must resume
+      // that document - re-running processFile would upload a duplicate. Only a
+      // failure of the upload itself may retry the upload.
+      const resumeDocumentId = createdDocumentId;
       await reportApiError(caught, "The document could not be processed.", {
-        retry: () => void processFile(file),
+        retry: resumeDocumentId
+          ? () => void openDocument(resumeDocumentId)
+          : () => void processFile(file),
       });
     } finally {
       if (activeRunRef.current === controller) {
@@ -1944,6 +1991,9 @@ export function DocumentStudio() {
         window.history.replaceState({}, "", url.toString());
       }
       resetPageState();
+      // Documents open on the Financial view once, here - not on every summary
+      // refresh, which would keep yanking the reviewer off their chosen tab.
+      setActiveTab("financial");
       if (!isTerminal(detail.status)) {
         await followJob(documentId, controller.signal);
       } else if ((detail.page_count ?? 0) > 0) {
@@ -1999,6 +2049,14 @@ export function DocumentStudio() {
         setDocument(demoDocument);
         setPages(demoPages);
         setSelectedId(demoPages[0].blocks[0].block_id);
+        setActiveTab("page");
+        // The deleted id must not survive in the URL - reloading with a stale
+        // ?documentId= would show an error banner for a document that is gone.
+        if (typeof window !== "undefined") {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("documentId");
+          window.history.replaceState({}, "", url.toString());
+        }
       }
     } catch (caught) {
       setDocumentListError(describeError(caught, "The document could not be deleted."));
@@ -2046,7 +2104,12 @@ export function DocumentStudio() {
   }
 
   async function handleDownload(
-    artifact: "reviewed-bilingual" | "financial" | "financial-xlsx",
+    artifact:
+      | "reviewed-bilingual"
+      | "financial"
+      | "financial-xlsx"
+      | "reviewed-financial"
+      | "reviewed-financial-xlsx",
   ) {
     if (downloadingArtifact) return;
     setActionError(null);
@@ -2061,7 +2124,9 @@ export function DocumentStudio() {
       link.href = url;
       link.download = "demo-" + artifact + ".json";
       link.click();
-      URL.revokeObjectURL(url);
+      // Revoking immediately after click() can cancel a download that hasn't
+      // started streaming yet; give the browser time to open the blob first.
+      window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
       return;
     }
     setDownloadingArtifact(artifact);
@@ -2078,14 +2143,14 @@ export function DocumentStudio() {
 
   async function handleFinancialReview(decision: "approved" | "rejected") {
     if (document.demo || !financialResult || financialReviewSubmitting) return;
+    // Only record what the reviewer actually entered. Defaulting the currency from
+    // the extracted value would fabricate "reviewer" corrections for untouched
+    // cells (including on Reject).
     const corrections = financialCorrectionCells
       .map((cell) => ({
         cell_id: cell.cell_id,
         normalized_value: financialCorrections[cell.cell_id]?.trim() || null,
-        currency:
-          financialCorrectionCurrencies[cell.cell_id]?.trim() ||
-          cell.value.currency ||
-          null,
+        currency: financialCorrectionCurrencies[cell.cell_id]?.trim() || null,
         reason: "Reviewer-entered normalized correction",
       }))
       .filter(
@@ -2127,29 +2192,77 @@ export function DocumentStudio() {
     setFinancialReviewSubmitting(true);
     setActionError(null);
     try {
-      const persisted = await createFinancialReview(document.id, {
-        decision,
-        note: financialReviewNote.trim() || null,
-        corrections,
-        structure_decisions: structureDecisions,
-      });
+      const persisted = await createFinancialReview(
+        document.id,
+        {
+          decision,
+          note: financialReviewNote.trim() || null,
+          corrections,
+          structure_decisions: structureDecisions,
+        },
+        document.financial_result_sha256,
+      );
       setFinancialReviews((current) => [persisted, ...current]);
+      // Minimal optimistic update so the decision is visible immediately; the
+      // authoritative document status is re-fetched from the server below.
       setDocument((current) => ({
         ...current,
-        ...(decision === "rejected"
-          ? { status: "needs_review" as const, current_stage: "needs_review" }
-          : {}),
         financial_review_status: decision,
         financial_reviewed_by: persisted.reviewer_subject,
         financial_reviewed_at: persisted.created_at,
       }));
+      // Guarded like every other async fetch in this file (see openDocument):
+      // if the reviewer navigates to a different document while this refetch
+      // is still in flight, activeRunRef.current will have moved on and this
+      // stale response must never overwrite what's now on screen.
+      activeRunRef.current?.abort();
+      const refreshController = new AbortController();
+      activeRunRef.current = refreshController;
+      try {
+        const refreshed = await getDocument(document.id, {
+          signal: refreshController.signal,
+        });
+        if (activeRunRef.current === refreshController) {
+          setDocument(refreshed);
+        }
+      } catch {
+        // Keep the optimistic view; the next poll or reopen reconciles it.
+      } finally {
+        if (activeRunRef.current === refreshController) {
+          activeRunRef.current = null;
+        }
+      }
       setInfo(
         decision === "approved"
           ? "Financial result approved and audit record saved."
           : "Financial result rejected and audit record saved.",
       );
     } catch (caught) {
-      await reportApiError(caught, "Financial review could not be saved.");
+      if (caught instanceof ApiError && caught.status === 409) {
+        activeRunRef.current?.abort();
+        const conflictController = new AbortController();
+        activeRunRef.current = conflictController;
+        try {
+          const refreshed = await getDocument(document.id, {
+            signal: conflictController.signal,
+          });
+          if (activeRunRef.current === conflictController) {
+            setDocument(refreshed);
+          }
+        } catch {
+          // If the refresh itself fails, fall through to the generic error below.
+        } finally {
+          if (activeRunRef.current === conflictController) {
+            activeRunRef.current = null;
+          }
+        }
+        setActionError(
+          "This document changed since you opened it, so your view was refreshed. " +
+            "Review the current result and try again.",
+        );
+      } else {
+        await reportApiError(caught, "Financial review could not be saved.");
+      }
     } finally {
       setFinancialReviewSubmitting(false);
     }
@@ -2160,6 +2273,22 @@ export function DocumentStudio() {
     setTranslationReviewSubmitting(true);
     setActionError(null);
     try {
+      // Corrections persist while the reviewer navigates between pages, so each one
+      // must be serialized with the page its block/cell actually lives on - not the
+      // page currently in view. Every correctable target was rendered from a loaded
+      // page in pageCache, so its true page number is resolvable from there.
+      const pageNumberByTarget = new Map<string, number>();
+      for (const cachedPage of Object.values(pageCache)) {
+        const cachedPageNumber = cachedPage.page.page_number;
+        for (const cachedBlock of cachedPage.blocks) {
+          pageNumberByTarget.set(`block:${cachedBlock.block_id}`, cachedPageNumber);
+        }
+        for (const cachedTable of cachedPage.tables) {
+          for (const cachedCell of cachedTable.cells) {
+            pageNumberByTarget.set(`cell:${cachedCell.cell_id}`, cachedPageNumber);
+          }
+        }
+      }
       let corrections = Object.entries(translationCorrections)
         .filter(([, text]) => text.trim())
         .map(([key, text]) => {
@@ -2168,7 +2297,7 @@ export function DocumentStudio() {
           return {
             target_kind: (kind === "cell" ? "cell" : "block") as "block" | "cell",
             target_id: targetId,
-            page_number: currentPage,
+            page_number: pageNumberByTarget.get(key) ?? currentPage,
             corrected_translated_text: text.trim(),
             reason: "Reviewer correction from translation workspace",
           };
@@ -2230,55 +2359,107 @@ export function DocumentStudio() {
         const byKey = new Map(
           corrections.map((item) => [`${item.target_kind}:${item.target_id}`, item]),
         );
-        for (const target of required) {
-          const key = `${target.target_kind}:${target.target_id}`;
-          if (!byKey.has(key)) {
-            byKey.set(key, {
-              target_kind: target.target_kind,
-              target_id: target.target_id,
-              page_number: target.page_number,
-              corrected_translated_text:
-                translationCorrections[key]?.trim() || target.defaultText,
-              reason: "Reviewer confirmed machine translation",
-            });
-          }
-        }
-        corrections = Array.from(byKey.values()).filter(
-          (item) => item.corrected_translated_text.trim().length >= 0,
-        );
+        // Approval requires every review-flagged target to resolve to non-empty
+        // text: the reviewer's correction when present, otherwise the machine
+        // translation. Anything that resolves to empty text blocks approval.
         const stillMissing = required.filter((target) => {
           const entry = byKey.get(`${target.target_kind}:${target.target_id}`);
-          return !entry;
+          const resolved = entry?.corrected_translated_text ?? target.defaultText;
+          return !resolved.trim();
         });
         if (stillMissing.length) {
           setActionError("Resolve every review-flagged translation before approval.");
           return;
         }
+        // Record an explicit confirmation only for targets the reviewer left
+        // untouched and that carry non-empty machine text.
+        for (const target of required) {
+          const key = `${target.target_kind}:${target.target_id}`;
+          if (!byKey.has(key) && target.defaultText.trim()) {
+            byKey.set(key, {
+              target_kind: target.target_kind,
+              target_id: target.target_id,
+              page_number: target.page_number,
+              corrected_translated_text: target.defaultText,
+              reason: "Reviewer confirmed machine translation",
+            });
+          }
+        }
+        corrections = Array.from(byKey.values()).filter(
+          (item) => item.corrected_translated_text.trim().length > 0,
+        );
       }
 
-      const persisted = await createTranslationReview(document.id, {
-        decision,
-        note: translationReviewNote.trim() || null,
-        corrections,
-      });
+      const persisted = await createTranslationReview(
+        document.id,
+        {
+          decision,
+          note: translationReviewNote.trim() || null,
+          corrections,
+        },
+        document.translation_result_sha256,
+      );
       setTranslationReviews((current) => [persisted, ...current]);
+      // Minimal optimistic update so the decision is visible immediately; the
+      // authoritative document status is re-fetched from the server below.
       setDocument((current) => ({
         ...current,
-        ...(decision === "rejected"
-          ? { status: "needs_review" as const, current_stage: "needs_review" }
-          : { status: "completed" as const, current_stage: "completed" }),
-        document_review_status: decision === "approved" ? "approved" : "rejected",
         translation_review_status: decision,
         translation_reviewed_by: persisted.reviewer_subject,
         translation_reviewed_at: persisted.created_at,
       }));
+      // Guarded like every other async fetch in this file (see openDocument):
+      // if the reviewer navigates to a different document while this refetch
+      // is still in flight, activeRunRef.current will have moved on and this
+      // stale response must never overwrite what's now on screen.
+      activeRunRef.current?.abort();
+      const refreshController = new AbortController();
+      activeRunRef.current = refreshController;
+      try {
+        const refreshed = await getDocument(document.id, {
+          signal: refreshController.signal,
+        });
+        if (activeRunRef.current === refreshController) {
+          setDocument(refreshed);
+        }
+      } catch {
+        // Keep the optimistic view; the next poll or reopen reconciles it.
+      } finally {
+        if (activeRunRef.current === refreshController) {
+          activeRunRef.current = null;
+        }
+      }
       setInfo(
         decision === "approved"
           ? "Translation approved. Reviewed bilingual export is now available."
           : "Translation rejected and audit record saved.",
       );
     } catch (caught) {
-      await reportApiError(caught, "Translation review could not be saved.");
+      if (caught instanceof ApiError && caught.status === 409) {
+        activeRunRef.current?.abort();
+        const conflictController = new AbortController();
+        activeRunRef.current = conflictController;
+        try {
+          const refreshed = await getDocument(document.id, {
+            signal: conflictController.signal,
+          });
+          if (activeRunRef.current === conflictController) {
+            setDocument(refreshed);
+          }
+        } catch {
+          // If the refresh itself fails, fall through to the generic error below.
+        } finally {
+          if (activeRunRef.current === conflictController) {
+            activeRunRef.current = null;
+          }
+        }
+        setActionError(
+          "This document changed since you opened it, so your view was refreshed. " +
+            "Review the current result and try again.",
+        );
+      } else {
+        await reportApiError(caught, "Translation review could not be saved.");
+      }
     } finally {
       setTranslationReviewSubmitting(false);
     }
@@ -2334,6 +2515,7 @@ export function DocumentStudio() {
     >
       <input
         accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp"
+        aria-label="Upload document"
         className="visually-hidden"
         onChange={handleFileInput}
         ref={inputRef}
@@ -2407,6 +2589,20 @@ export function DocumentStudio() {
           <button className="secondary-button" disabled={!financialResult || !!downloadingArtifact} onClick={() => void handleDownload("financial-xlsx")}><Icon name="download" /> XLSX</button>
           <button
             className="secondary-button export-button"
+            disabled={document.demo || document.financial_review_status !== "approved" || !!downloadingArtifact}
+            onClick={() => void handleDownload("reviewed-financial")}
+          >
+            <Icon name="download" /> Approved financial
+          </button>
+          <button
+            className="secondary-button export-button"
+            disabled={document.demo || document.financial_review_status !== "approved" || !!downloadingArtifact}
+            onClick={() => void handleDownload("reviewed-financial-xlsx")}
+          >
+            <Icon name="download" /> Approved financial XLSX
+          </button>
+          <button
+            className="secondary-button export-button"
             disabled={document.demo || document.document_review_status !== "approved" || !!downloadingArtifact}
             onClick={() => void handleDownload("reviewed-bilingual")}
           >
@@ -2443,16 +2639,14 @@ export function DocumentStudio() {
         style={inspectorWidth !== null ? { gridTemplateColumns: `minmax(0, 1fr) 6px ${inspectorWidth}px` } : undefined}
       >
       <div className="studio-main-column">
-      {!document.demo && health && (!health.azure_configured.document_intelligence || !health.azure_configured.openai) ? (
+      {!document.demo && healthDependencies && (!diConfigured || !openaiConfigured) ? (
         <div className="notice-bar" role="status">
           <span className="notice-icon">!</span>
           <span className="notice-copy">
             <strong>Service not fully configured</strong>
             <span>
-              {!health.azure_configured.document_intelligence
-                ? "Document extraction is not configured. "
-                : ""}
-              {!health.azure_configured.openai
+              {!diConfigured ? "Document extraction is not configured. " : ""}
+              {!openaiConfigured
                 ? "Translation is not configured - documents will extract but fail at the translation step."
                 : ""}
             </span>
@@ -2688,14 +2882,32 @@ export function DocumentStudio() {
           </div>
           <div ref={viewerRef} className="viewer-canvas" onDoubleClick={() => setZoom((value) => (value < 1 ? 1 : 0.82))}>
             {page || canPreviewSource ? (
+              // The outer frame owns layout space: for quarter rotations it takes the
+              // swapped (visual) dimensions so scrolling and centering stay correct.
+              // The inner element keeps the unrotated page size and is rotated in
+              // place, carrying the page content and overlays with it.
               <div
                 className="page-rotation-frame"
                 style={{
-                  height: canvasHeight,
-                  transform: "rotate(" + rotation + "deg)",
-                  width: canvasWidth,
+                  height: rotation % 180 !== 0 ? canvasWidth : canvasHeight,
+                  width: rotation % 180 !== 0 ? canvasHeight : canvasWidth,
                 }}
               >
+                <div
+                  className="page-rotation-inner"
+                  style={{
+                    height: canvasHeight,
+                    transform:
+                      rotation === 90
+                        ? "rotate(90deg) translateY(-100%)"
+                        : rotation === 180
+                          ? "rotate(180deg) translate(-100%, -100%)"
+                          : rotation === 270
+                            ? "rotate(270deg) translateX(-100%)"
+                            : undefined,
+                    width: canvasWidth,
+                  }}
+                >
                 {document.demo && page ? (
                   <DemoPage
                     hoveredId={hoveredId}
@@ -2709,7 +2921,7 @@ export function DocumentStudio() {
                   <div className="real-page-frame">
                     <PdfPage
                       authSrc={realSource}
-                      onReady={handleSourceReady}
+                      onReady={handlePdfSourceReady}
                       pageNumber={currentPage}
                       rotation={0}
                       src={realSource}
@@ -2738,16 +2950,15 @@ export function DocumentStudio() {
                       className="source-image-preview"
                       onLoad={(event) => {
                         const image = event.currentTarget;
-                        handleSourceReady(image.naturalWidth * zoom, image.naturalHeight * zoom);
+                        // Record natural dimensions; the frame applies the zoom, and
+                        // the image simply fills it (no second scaling pass).
+                        handleSourceReady(image.naturalWidth, image.naturalHeight);
                       }}
                       src={realSource}
                       style={{
                         display: "block",
-                        height: "auto",
-                        maxWidth: "100%",
-                        transform: "scale(" + zoom + ")",
-                        transformOrigin: "top left",
-                        width: "auto",
+                        height: "100%",
+                        width: "100%",
                       }}
                     />
                     {overlays && page ? (
@@ -2761,6 +2972,7 @@ export function DocumentStudio() {
                     ) : null}
                   </div>
                 ) : null}
+                </div>
               </div>
             ) : (
               <div className="empty-viewer">

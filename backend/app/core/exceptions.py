@@ -105,3 +105,15 @@ class RateLimitError(AppError):
     code = "rate_limit_exceeded"
     status_code = 429
     retryable = True
+
+
+class ProviderQuotaError(AppError):
+    """Fail-closed denial when a global provider budget or kill switch trips.
+
+    A within-window retry cannot succeed, so this is deliberately non-retryable:
+    it protects against runaway external cost and enables an operator stop switch.
+    """
+
+    code = "provider_quota_exceeded"
+    status_code = 503
+    retryable = False

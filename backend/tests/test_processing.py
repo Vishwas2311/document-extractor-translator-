@@ -1501,6 +1501,213 @@ async def test_translation_dedupes_identical_source_strings() -> None:
     ]
 
 
+async def test_dedupe_follower_keeps_its_own_review_flags_and_warnings() -> None:
+    # Fan-out from a dedupe representative must MERGE into followers, not
+    # overwrite them: a follower carrying its own low OCR-confidence flag must
+    # stay review_required with its OCR warning after receiving the shared
+    # translation.
+    storage = MemoryStorage()
+    service = _service(
+        storage=storage,
+        translator=FakeTranslator(),
+        translation_dedupe_identical=True,
+    )
+    document = CanonicalDocument(
+        document_id="doc-dedupe-merge",
+        filename="dedupe-merge.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(
+                block_id="b-rep",
+                reading_order=1,
+                source_text="الإجمالي",
+                ocr_confidence=0.99,
+            ),
+            TextBlock(
+                block_id="b-follower",
+                reading_order=2,
+                source_text="الإجمالي",
+                ocr_confidence=0.5,
+            ),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+    representative, follower = document.blocks
+
+    assert review_required
+    assert representative.translation_status == TranslationStatus.TRANSLATED
+    assert not representative.review_required
+    assert follower.translation_status == TranslationStatus.TRANSLATED
+    assert follower.translated_text == representative.translated_text
+    # The follower's own OCR flag and warning survive the fan-out.
+    assert follower.review_required
+    assert any("OCR confidence" in warning for warning in follower.warnings)
+
+
+def test_mark_untranslated_outside_selection_resolves_pending_blocks_and_cells() -> None:
+    from app.schemas.page import BoundingRegion
+
+    document = CanonicalDocument(
+        document_id="doc-excluded",
+        filename="excluded.pdf",
+        status="translating",
+        pages=[
+            PageMetadata(page_number=1, page_count=2, width=8.5, height=11, unit="inch"),
+            PageMetadata(page_number=2, page_count=2, width=8.5, height=11, unit="inch"),
+        ],
+        blocks=[
+            TextBlock(
+                block_id="b-selected",
+                reading_order=1,
+                source_text="مرحبا",
+                translation_status=TranslationStatus.TRANSLATED,
+                bounding_regions=[BoundingRegion(page_number=1)],
+            ),
+            TextBlock(
+                block_id="b-excluded",
+                reading_order=2,
+                source_text="青年",
+                bounding_regions=[BoundingRegion(page_number=2)],
+            ),
+        ],
+        tables=[
+            TableResult(
+                table_id="t-excluded",
+                row_count=1,
+                column_count=1,
+                cells=[
+                    TableCell(
+                        cell_id="t-excluded-c1",
+                        row_index=0,
+                        column_index=0,
+                        content="拾万元",
+                        bounding_regions=[BoundingRegion(page_number=2)],
+                    )
+                ],
+            )
+        ],
+    )
+
+    ProcessingService._mark_untranslated_outside_selection(document, {1})
+
+    selected_block, excluded_block = document.blocks
+    excluded_cell = document.tables[0].cells[0]
+    assert selected_block.translation_status == TranslationStatus.TRANSLATED
+    assert selected_block.warnings == []
+    assert excluded_block.translation_status == TranslationStatus.NOT_REQUIRED
+    assert excluded_block.warnings == [ProcessingService.EXCLUDED_PAGE_WARNING]
+    assert excluded_cell.translation_status == TranslationStatus.NOT_REQUIRED
+    assert excluded_cell.warnings == [ProcessingService.EXCLUDED_PAGE_WARNING]
+
+
+class DenseClassifyAnalyzer:
+    """Selects pages 1-2 as financial and rejects page 3 with high confidence,
+    producing a 2/3 selection density that trips the adaptive dense-full-extract
+    path; analyze() then returns the full three-page layout."""
+
+    def __init__(self) -> None:
+        self.analyze_calls: list[str | None] = []
+
+    async def classify(
+        self,
+        source_path: Path,
+        *,
+        classifier_id: str,
+        split_mode: str,
+    ) -> dict[str, object]:
+        return {
+            "documents": [
+                {
+                    "docType": "financial_table",
+                    "confidence": 0.95,
+                    "boundingRegions": [{"pageNumber": 1}, {"pageNumber": 2}],
+                },
+                {
+                    "docType": "non_financial",
+                    "confidence": 0.99,
+                    "boundingRegions": [{"pageNumber": 3}],
+                },
+            ]
+        }
+
+    async def analyze(
+        self, source_path: Path, *, pages: str | None = None
+    ) -> dict[str, Any]:
+        self.analyze_calls.append(pages)
+        return _raw_pages([1, 2, 3])
+
+
+class DenseRepository(MemoryRepository):
+    async def get(self, document_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=document_id,
+            original_filename="dense.pdf",
+            stored_extension="pdf",
+            data_class="synthetic",
+            processing_profile="GENAI_SYNTHETIC_POC",
+            status=self.status,
+            page_count=3,
+            pages_ready=None,
+            financial_extraction_mode="selective",
+        )
+
+
+async def test_dense_full_extract_final_writes_every_page_and_resolves_excluded_blocks() -> None:
+    from app.integrations.document_intelligence.mapper import DocumentIntelligenceMapper
+    from app.services.export import ExportService
+    from app.services.financial import (
+        FinancialCandidateSelector,
+        FinancialExtractionService,
+    )
+
+    repository = DenseRepository()
+    storage = MemoryStorage()
+    analyzer = DenseClassifyAnalyzer()
+    selector = FinancialCandidateSelector(
+        financial_labels={"financial_table"},
+        include_confidence=0.65,
+        exclude_confidence=0.9,
+        adjacent_pages=0,
+    )
+    service = _service(
+        repository=repository,
+        storage=storage,
+        analyzer=analyzer,
+        mapper=DocumentIntelligenceMapper(),
+        translator=FakeTranslator(),
+        exporter=ExportService(),
+        financial_selector=selector,
+        financial_extractor=FinancialExtractionService(),
+        financial_extraction_mode="selective",
+        financial_classifier_model_id="finance-classifier",
+        financial_classifier_version="7",
+    )
+    service._estimate_pdf_pages = _async_const(3)  # type: ignore[method-assign]
+
+    await service.process("doc-dense")
+
+    # Dense selection (2 of 3 pages) triggered one full-document extraction.
+    assert analyzer.analyze_calls == [None]
+    final_status = str(repository.document_updates[-1]["status"])
+    assert final_status in {"completed", "needs_review"}
+    # Every extracted page is final-written; none is left at "normalizing".
+    for page_number in (1, 2, 3):
+        page = storage.payloads[f"pages/page-{page_number:04d}.json"]
+        assert page["document_status"] == final_status
+    # The non-selected page's block resolved to not_required with the policy warning.
+    excluded_page = storage.payloads["pages/page-0003.json"]
+    excluded_block = excluded_page["blocks"][0]
+    assert excluded_block["translation_status"] == "not_required"
+    assert ProcessingService.EXCLUDED_PAGE_WARNING in excluded_block["warnings"]
+    # Selected pages actually translated.
+    selected_block = storage.payloads["pages/page-0001.json"]["blocks"][0]
+    assert selected_block["translation_status"] == "translated"
+
+
 async def test_parallel_di_ranges_honor_concurrency_cap() -> None:
     import asyncio
 

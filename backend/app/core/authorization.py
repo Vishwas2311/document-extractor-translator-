@@ -101,6 +101,15 @@ def require_document_access(
             or principal.has_role(ROLE_ORG_ADMIN, ROLE_OPERATOR)
         ):
             raise AuthorizationError("This principal is not allowed to delete the document.")
+        # Retry and cancel mutate processing state; mirror the owner-scoped
+        # "delete" model so org-wide readers (auditors) can never trigger them.
+        if action in {"retry", "cancel"} and not (
+            principal.subject == owner_subject
+            or principal.has_role(ROLE_ORG_ADMIN, ROLE_OPERATOR)
+        ):
+            raise AuthorizationError(
+                "This principal is not allowed to retry or cancel document processing."
+            )
         if action == "assign" and not principal.has_role(
             ROLE_ORG_ADMIN, ROLE_CASEWORKER, ROLE_OPERATOR
         ):

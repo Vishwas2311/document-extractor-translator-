@@ -25,7 +25,7 @@ from app.integrations.document_intelligence.mapper import DocumentIntelligenceMa
 from app.prompts.translation import TRANSLATION_PROMPT_VERSION
 from app.repositories.documents import DocumentRepository
 from app.schemas.financial import FinancialClassificationResult, FinancialResult
-from app.schemas.page import CanonicalDocument, TableCell, TextBlock
+from app.schemas.page import BoundingRegion, CanonicalDocument, TableCell, TextBlock
 from app.schemas.translation import (
     TranslationBatchRequest,
     TranslationBatchResponse,
@@ -430,6 +430,38 @@ class ProcessingService:
         pages = [page for page in document.pages if page.page_number in selected_pages]
         return document.model_copy(update={"blocks": blocks, "tables": tables, "pages": pages})
 
+    EXCLUDED_PAGE_WARNING = (
+        "Page not selected for translation under the financial processing policy."
+    )
+
+    @staticmethod
+    def _mark_untranslated_outside_selection(
+        document: CanonicalDocument,
+        selected_pages: set[int],
+    ) -> None:
+        """Resolve blocks/cells on non-selected pages that never entered translation.
+
+        They keep the schema default PENDING otherwise, which reads as
+        "translation still running" forever in completed exports.
+        """
+
+        def excluded(regions: list[BoundingRegion]) -> bool:
+            return not any(region.page_number in selected_pages for region in regions)
+
+        for block in document.blocks:
+            if block.translation_status == TranslationStatus.PENDING and excluded(
+                block.bounding_regions
+            ):
+                block.translation_status = TranslationStatus.NOT_REQUIRED
+                block.warnings.append(ProcessingService.EXCLUDED_PAGE_WARNING)
+        for table in document.tables:
+            for cell in table.cells:
+                if cell.translation_status == TranslationStatus.PENDING and excluded(
+                    cell.bounding_regions
+                ):
+                    cell.translation_status = TranslationStatus.NOT_REQUIRED
+                    cell.warnings.append(ProcessingService.EXCLUDED_PAGE_WARNING)
+
     async def _write_financial_result(
         self,
         document_id: str,
@@ -481,6 +513,28 @@ class ProcessingService:
                 item["review_required"] = True
         await self.storage.write_json(document_id, PAGES_INDEX_PATH, index)
         return result
+
+    @staticmethod
+    def _merge_follower(
+        follower: TextBlock,
+        representative: TextBlock,
+        *,
+        copy_translation: bool = True,
+    ) -> None:
+        """Fan a dedupe representative's translation out to a follower block.
+
+        Merges instead of overwriting: the follower keeps its own review flags
+        and warnings (e.g. a low OCR-confidence flag the representative never
+        had), OR-ing review_required and extending warnings without duplicates.
+        """
+        if copy_translation:
+            follower.translated_text = representative.translated_text
+            follower.source_language = representative.source_language
+        follower.translation_status = representative.translation_status
+        follower.review_required = follower.review_required or representative.review_required
+        for warning in representative.warnings:
+            if warning not in follower.warnings:
+                follower.warnings.append(warning)
 
     def _batches(self, blocks: list[TextBlock]) -> list[list[TextBlock]]:
         batches: list[list[TextBlock]] = []
@@ -687,7 +741,7 @@ class ProcessingService:
                 )
                 for block in blocks
             ]
-            prepared = self.gateway.prepare_translation_inputs(profile, raw_inputs)
+            prepared = await self.gateway.prepare_translation_inputs(profile, raw_inputs)
             request = TranslationBatchRequest(blocks=prepared.inputs)
             hash_input = (
                 f"{TRANSLATION_PROMPT_VERSION}\n{profile.value}\n{request.model_dump_json()}"
@@ -795,20 +849,14 @@ class ProcessingService:
                                 "needs manual review."
                             )
                         for follower in followers.get(block.block_id, []):
-                            follower.translated_text = block.translated_text
-                            follower.translation_status = block.translation_status
-                            follower.source_language = block.source_language
-                            follower.review_required = block.review_required
-                            follower.warnings = list(block.warnings)
+                            self._merge_follower(follower, block)
 
             async with io_lock:
                 if batch_failed:
                     review_required = True
                     for block in blocks:
                         for follower in followers.get(block.block_id, []):
-                            follower.translation_status = block.translation_status
-                            follower.review_required = block.review_required
-                            follower.warnings = list(block.warnings)
+                            self._merge_follower(follower, block, copy_translation=False)
                 completed += 1
                 if on_batch_progress is not None:
                     await on_batch_progress(completed, total_batches)
@@ -1429,6 +1477,8 @@ class ProcessingService:
             # model_copy() over the same block/cell references (see
             # _translation_view) - either way _translate() just mutated the same
             # objects canonical.blocks/tables point to.
+            if selected_pages is not None:
+                self._mark_untranslated_outside_selection(canonical, set(selected_pages))
             await self._refresh_source_languages(document_id, job.id, canonical)
             financial_result: FinancialResult | None = None
             financial_result_hash: str | None = None
@@ -1462,10 +1512,15 @@ class ProcessingService:
                     self.financial_extraction_mode,
                 )
             )
+            # When the adaptive dense-full-extract path ran (extraction_pages is
+            # None despite a selective page list), extraction produced every page,
+            # so every page must be final-written - otherwise non-selected page
+            # JSON stays stuck at "normalizing" forever.
             pages_to_write = (
                 set(selected_pages)
                 if stored_financial_mode == "selective"
                 and selected_pages is not None
+                and extraction_pages is not None
                 else None
             )
             page_numbers = await self._write_pages(

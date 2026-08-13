@@ -1,3 +1,4 @@
+import bisect
 from collections.abc import Iterable
 from typing import Any
 
@@ -74,18 +75,64 @@ def slice_utf16(content_utf16: bytes, offset: int, length: int) -> str:
     return content_utf16[start:end].decode("utf-16-le")
 
 
-def overlaps(left: Span, right: Span) -> bool:
-    return left.offset < right.offset + right.length and right.offset < left.offset + left.length
+class _SpanIndex:
+    """Interval index for O(log n + k) 'which entries overlap this query span'
+    lookups, built once per document/range instead of rescanning the full
+    entry list for every text block (O(blocks * entries), which dominates
+    mapping time on dense, multi-hundred-page Document Intelligence ranges).
+
+    Entries of the same kind (word spans, table-cell spans) never overlap each
+    other in Document Intelligence's own output, which is what makes the fast
+    bisect path valid (sorted-by-start also implies sorted-by-end). That
+    invariant is verified when the index is built rather than assumed: if it
+    ever doesn't hold, queries fall back to an exact linear scan, so results
+    are identical to a naive nested-loop scan either way - only speed differs.
+    """
+
+    def __init__(self, entries: list[tuple[int, int, Any]]) -> None:
+        ordered = sorted(entries, key=lambda entry: entry[0])
+        self._entries = ordered
+        self._starts = [entry[0] for entry in ordered]
+        ends = [entry[1] for entry in ordered]
+        self._ends = ends
+        self._sane = all(ends[i] <= ends[i + 1] for i in range(len(ends) - 1))
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def overlapping(self, query_start: int, query_end: int) -> list[tuple[int, int, Any]]:
+        if not self._entries:
+            return []
+        if not self._sane:
+            return [
+                entry
+                for entry in self._entries
+                if entry[0] < query_end and entry[1] > query_start
+            ]
+        hi = bisect.bisect_left(self._starts, query_end)
+        if hi <= 0:
+            return []
+        lo = bisect.bisect_right(self._ends, query_start)
+        return self._entries[lo:hi] if lo < hi else []
+
+
+def _span_index(spans_by_entry: list[tuple[Any, list[Span]]]) -> _SpanIndex:
+    entries = [
+        (span.offset, span.offset + span.length, entry_id)
+        for entry_id, entry_spans in spans_by_entry
+        for span in entry_spans
+    ]
+    return _SpanIndex(entries)
 
 
 def covered_by_table_cells(
     block_spans: list[Span],
-    table_cell_spans: list[Span],
+    cell_index: _SpanIndex,
     *,
     threshold: float = 0.8,
 ) -> bool:
     total_length = sum(max(item.length, 0) for item in block_spans)
-    if total_length <= 0 or not table_cell_spans:
+    if total_length <= 0 or len(cell_index) == 0:
         return False
 
     covered_length = 0
@@ -93,9 +140,9 @@ def covered_by_table_cells(
         block_start = block_span.offset
         block_end = block_span.offset + block_span.length
         covered_segments: list[tuple[int, int]] = []
-        for cell_span in table_cell_spans:
-            start = max(block_start, cell_span.offset)
-            end = min(block_end, cell_span.offset + cell_span.length)
+        for cell_start, cell_end, _payload in cell_index.overlapping(block_start, block_end):
+            start = max(block_start, cell_start)
+            end = min(block_end, cell_end)
             if start < end:
                 covered_segments.append((start, end))
         if not covered_segments:
@@ -113,25 +160,43 @@ def covered_by_table_cells(
     return covered_length / total_length >= threshold
 
 
-def language_for(block_spans: list[Span], raw_languages: list[dict[str, Any]]) -> str:
-    for language in raw_languages:
-        language_spans = spans(language)
-        if any(overlaps(a, b) for a in block_spans for b in language_spans):
-            return str(value(language, "locale", default="und"))
-    return "und"
+def language_for(
+    block_spans: list[Span],
+    language_index: _SpanIndex,
+    locales: list[str],
+) -> str:
+    # Matches must resolve to the first-listed language among all overlaps,
+    # mirroring the original "iterate raw_languages in order, return on first
+    # match" behavior - not the first spatially found.
+    matched_language_ids: set[int] = set()
+    for block_span in block_spans:
+        for _start, _end, language_id in language_index.overlapping(
+            block_span.offset, block_span.offset + block_span.length
+        ):
+            matched_language_ids.add(language_id)
+    if not matched_language_ids:
+        return "und"
+    return locales[min(matched_language_ids)]
 
 
-def confidence_for(block_spans: list[Span], raw_words: list[dict[str, Any]]) -> float | None:
+def confidence_for(
+    block_spans: list[Span],
+    word_index: _SpanIndex,
+    word_meta: list[tuple[Any, int]],
+) -> float | None:
+    matched_word_ids: set[int] = set()
+    for block_span in block_spans:
+        for _start, _end, word_id in word_index.overlapping(
+            block_span.offset, block_span.offset + block_span.length
+        ):
+            matched_word_ids.add(word_id)
+
     weighted = 0.0
     total_length = 0
-    for word in raw_words:
-        word_spans = spans(word)
-        if not any(overlaps(a, b) for a in block_spans for b in word_spans):
-            continue
-        confidence = value(word, "confidence")
+    for word_id in matched_word_ids:
+        confidence, weight = word_meta[word_id]
         if confidence is None:
             continue
-        weight = max(sum(span.length for span in word_spans), 1)
         weighted += float(confidence) * weight
         total_length += weight
     return round(weighted / total_length, 4) if total_length else None
@@ -169,6 +234,10 @@ class DocumentIntelligenceMapper:
             raw_words.extend(value(page, "words", default=[]) or [])
 
         raw_languages = value(raw, "languages", default=[]) or []
+        locales = [str(value(language, "locale", default="und")) for language in raw_languages]
+        language_index = _span_index(
+            [(lang_id, spans(language)) for lang_id, language in enumerate(raw_languages)]
+        )
         raw_tables = value(raw, "tables", default=[]) or []
         table_cell_spans = [
             cell_span
@@ -176,18 +245,31 @@ class DocumentIntelligenceMapper:
             for cell in value(table, "cells", default=[]) or []
             for cell_span in spans(cell)
         ]
+        table_cell_index = _span_index(
+            [(None, [cell_span]) for cell_span in table_cell_spans]
+        )
+
+        word_meta: list[tuple[Any, int]] = []
+        word_spans_by_id: list[tuple[int, list[Span]]] = []
+        for word_id, word in enumerate(raw_words):
+            word_spans = spans(word)
+            weight = max(sum(span.length for span in word_spans), 1)
+            word_meta.append((value(word, "confidence"), weight))
+            word_spans_by_id.append((word_id, word_spans))
+        word_index = _span_index(word_spans_by_id)
+
         blocks: list[TextBlock] = []
         for index, paragraph in enumerate(value(raw, "paragraphs", default=[]) or [], start=1):
             block_spans = spans(paragraph)
-            if covered_by_table_cells(block_spans, table_cell_spans):
+            if covered_by_table_cells(block_spans, table_cell_index):
                 continue
-            confidence = confidence_for(block_spans, raw_words)
+            confidence = confidence_for(block_spans, word_index, word_meta)
             blocks.append(
                 TextBlock(
                     block_id=f"b{index:06d}",
                     reading_order=index,
                     source_text=str(value(paragraph, "content", default="")),
-                    source_language=language_for(block_spans, raw_languages),
+                    source_language=language_for(block_spans, language_index, locales),
                     role=value(paragraph, "role"),
                     spans=block_spans,
                     bounding_regions=regions(paragraph),
@@ -207,7 +289,7 @@ class DocumentIntelligenceMapper:
                     column_index=int(value(cell, "column_index", "columnIndex", 0)),
                     row_span=int(value(cell, "row_span", "rowSpan", 1)),
                     column_span=int(value(cell, "column_span", "columnSpan", 1)),
-                    source_language=language_for(spans(cell), raw_languages),
+                    source_language=language_for(spans(cell), language_index, locales),
                     content=str(value(cell, "content", default="")),
                     kind=value(cell, "kind"),
                     spans=spans(cell),

@@ -45,6 +45,9 @@ class DocumentIntelligenceAnalyzer:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client: DocumentIntelligenceClient | None = None
+        # Strong references to in-flight fire-and-forget deletion tasks so the
+        # event loop cannot garbage-collect them mid-run; drained in close().
+        self._pending_deletes: set[asyncio.Task[None]] = set()
 
     async def _get_client(self) -> DocumentIntelligenceClient:
         endpoint = self.settings.azure_document_intelligence_endpoint
@@ -139,14 +142,17 @@ class DocumentIntelligenceAnalyzer:
                     # semaphore slot for one extra network round trip per range,
                     # serializing cleanup against the next range's work for no reason.
                     # `_delete_analyze_result` already catches and logs its own
-                    # exceptions, so a bare fire-and-forget task cannot leak or crash.
-                    asyncio.create_task(
+                    # exceptions. The task is tracked in _pending_deletes so it
+                    # cannot be garbage-collected before it runs; close() drains it.
+                    delete_task = asyncio.create_task(
                         self._delete_analyze_result(
                             client,
                             self.settings.azure_document_intelligence_model_id,
                             result_id,
                         )
                     )
+                    self._pending_deletes.add(delete_task)
+                    delete_task.add_done_callback(self._pending_deletes.discard)
                 else:
                     await logger.awarning("di_result_id_missing_skip_delete")
                 return payload
@@ -253,6 +259,8 @@ class DocumentIntelligenceAnalyzer:
             await logger.aexception("di_analyze_result_delete_failed", result_id=result_id)
 
     async def close(self) -> None:
+        if self._pending_deletes:
+            await asyncio.gather(*tuple(self._pending_deletes), return_exceptions=True)
         if self._client is not None:
             await self._client.close()
             self._client = None

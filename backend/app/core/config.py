@@ -23,9 +23,16 @@ class Settings(BaseSettings):
 
     # Auth: required by default. Set AUTH_REQUIRED=false only for ephemeral local demos.
     auth_required: bool = True
+    auth_mode: str = "local_bearer"
     api_auth_tokens: str = ""
     # Optional JSON map: {"token": {"subject":"...","organization_id":"...","roles":["reviewer"]}}
     api_auth_principals: str = ""
+    entra_tenant_id: str | None = None
+    entra_client_id: str | None = None
+    entra_issuer: str | None = None
+    entra_jwks_url: str | None = None
+    entra_organization_claim: str = "organization_id"
+    entra_roles_claim: str = "roles"
 
     database_url: str | None = None
     storage_root: Path = Path("storage/documents")
@@ -43,6 +50,15 @@ class Settings(BaseSettings):
     allowed_extensions: str = "pdf,png,jpg,jpeg,tif,tiff,bmp"
     rate_limit_per_minute: int = Field(default=120, ge=0, le=10000)
     use_create_all: bool = True
+    storage_backend: str = "local"
+    queue_backend: str = "in_process"
+    malware_scan_mode: str = "disabled"
+    pii_detection_mode: str = "regex"
+    # Azure AI Language endpoint used when pii_detection_mode == "multilingual".
+    azure_language_endpoint: str | None = None
+    azure_language_api_key: str | None = None
+    immutable_audit_enabled: bool = False
+    private_networking_enforced: bool = False
 
     # Data security gateway
     default_processing_profile: str = "GENAI_PSEUDONYMIZED"
@@ -80,6 +96,14 @@ class Settings(BaseSettings):
     # Raised for larger translation batches (40 blocks / 16k chars).
     azure_openai_max_completion_tokens: int = 12000
 
+    # Provider cost governance. Global, fail-closed guards against runaway external
+    # spend. 0 means "no cap" for that dimension; the kill switch stops all
+    # generative provider calls regardless of caps. Process-local for now — a
+    # multi-instance deployment must back these counters with a shared store.
+    provider_kill_switch: bool = False
+    provider_max_requests_per_day: int = Field(default=0, ge=0)
+    provider_max_tokens_per_day: int = Field(default=0, ge=0)
+
     target_language: str = "en"
     # Larger batches cut Azure OpenAI round-trips on dense multi-page docs.
     translation_max_blocks: int = 40
@@ -102,6 +126,12 @@ class Settings(BaseSettings):
     job_lease_seconds: int = 900
     job_heartbeat_seconds: int = 30
     recovery_sweep_seconds: int = 60
+    # Generous on purpose: the in-flight window covers the full upload request
+    # (streaming up to max_upload_size_mb plus validation), and the frontend's
+    # own upload timeout runs up to 30 minutes - a short TTL risks reclaiming a
+    # still-legitimately-in-flight reservation and letting a retry create a
+    # duplicate document mid-upload.
+    idempotency_reservation_max_age_seconds: int = 3600
 
     log_level: str = "INFO"
     log_format: str = "json"
@@ -121,6 +151,91 @@ class Settings(BaseSettings):
         ):
             # Deterministic local default so the app boots out of the box; override in .env.
             self.api_auth_tokens = "local-dev-token-change-me"
+        return self
+
+    @model_validator(mode="after")
+    def validate_security_configuration(self) -> "Settings":
+        """Reject internally inconsistent and unsafe production configurations.
+
+        The repository intentionally contains local adapters so developers can run the
+        synthetic-data demo.  Production must never silently fall back to those adapters
+        merely because a setting was omitted.
+        """
+        allowed_auth_modes = {"local_bearer", "entra_jwt"}
+        if self.auth_mode not in allowed_auth_modes:
+            raise ValueError("AUTH_MODE must be local_bearer or entra_jwt.")
+        if self.azure_auth_mode not in {"api_key", "managed_identity"}:
+            raise ValueError("AZURE_AUTH_MODE must be api_key or managed_identity.")
+        if self.storage_backend not in {"local", "azure_blob"}:
+            raise ValueError("STORAGE_BACKEND must be local or azure_blob.")
+        if self.queue_backend not in {"in_process", "service_bus"}:
+            raise ValueError("QUEUE_BACKEND must be in_process or service_bus.")
+        if self.malware_scan_mode not in {"disabled", "defender_for_storage"}:
+            raise ValueError(
+                "MALWARE_SCAN_MODE must be disabled or defender_for_storage."
+            )
+        if self.pii_detection_mode not in {"regex", "multilingual"}:
+            raise ValueError("PII_DETECTION_MODE must be regex or multilingual.")
+
+        if self.auth_mode == "entra_jwt":
+            missing = [
+                name
+                for name, value in {
+                    "ENTRA_TENANT_ID": self.entra_tenant_id,
+                    "ENTRA_CLIENT_ID": self.entra_client_id,
+                    "ENTRA_ISSUER": self.entra_issuer,
+                    "ENTRA_JWKS_URL": self.entra_jwks_url,
+                }.items()
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    "Entra JWT authentication is incomplete; missing " + ", ".join(missing)
+                )
+
+        if self.app_env.casefold() == "production":
+            violations: list[str] = []
+            if not self.auth_required:
+                violations.append("AUTH_REQUIRED must be true")
+            if self.auth_mode != "entra_jwt":
+                violations.append("AUTH_MODE must be entra_jwt")
+            if not (self.database_url or "").startswith(
+                ("postgresql+asyncpg://", "postgresql+psycopg://")
+            ):
+                violations.append("DATABASE_URL must use PostgreSQL")
+            if self.storage_backend != "azure_blob":
+                violations.append("STORAGE_BACKEND must be azure_blob")
+            if self.queue_backend != "service_bus":
+                violations.append("QUEUE_BACKEND must be service_bus")
+            if self.use_create_all:
+                violations.append("USE_CREATE_ALL must be false")
+            if self.azure_auth_mode != "managed_identity":
+                violations.append("AZURE_AUTH_MODE must be managed_identity")
+            if not self.pseudonymization_secret or len(self.pseudonymization_secret) < 32:
+                violations.append("PSEUDONYMIZATION_SECRET must contain at least 32 characters")
+            if self.malware_scan_mode != "defender_for_storage":
+                violations.append("MALWARE_SCAN_MODE must be defender_for_storage")
+            if self.pii_detection_mode != "multilingual":
+                violations.append("PII_DETECTION_MODE must be multilingual")
+            elif not self.azure_language_endpoint:
+                violations.append(
+                    "AZURE_LANGUAGE_ENDPOINT must be set for multilingual PII detection"
+                )
+            if not self.immutable_audit_enabled:
+                violations.append("IMMUTABLE_AUDIT_ENABLED must be true")
+            if not self.private_networking_enforced:
+                violations.append("PRIVATE_NETWORKING_ENFORCED must be true")
+            if self.rate_limit_per_minute <= 0:
+                violations.append("RATE_LIMIT_PER_MINUTE must be greater than zero")
+            if not self.cors_origins or any(
+                not origin.startswith("https://") or "localhost" in origin.casefold()
+                for origin in self.cors_origins
+            ):
+                violations.append("FRONTEND_ORIGINS must contain only approved HTTPS origins")
+            if violations:
+                raise ValueError(
+                    "Unsafe production configuration: " + "; ".join(violations)
+                )
         return self
 
     @property
@@ -173,6 +288,18 @@ class Settings(BaseSettings):
             for item in self.financial_classifier_labels.split(",")
             if item.strip()
         }
+
+    @model_validator(mode="after")
+    def validate_target_language(self) -> "Settings":
+        # The translation prompt and schema are hard-wired to English output.
+        # Any other configured target would be silently ignored, so fail closed
+        # at startup instead of misleading operators.
+        if self.target_language != "en":
+            raise ValueError(
+                "TARGET_LANGUAGE must be 'en'. English is the only supported "
+                "target language in this baseline."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_financial_extraction(self) -> "Settings":

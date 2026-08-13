@@ -113,6 +113,12 @@ export function PdfPage({
   const resolvedSrc = authSrc || src;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<{ cancel: () => void } | null>(null);
+  // The document reference is held across render-effect re-runs (page/zoom/rotation
+  // changes) and released only on unmount, source change, or a load error. If the
+  // render effect held it instead, a sole-holder instance would drop the cache
+  // refCount to 0 between re-runs, destroying the entry and re-fetching/re-parsing
+  // the whole blob on every zoom step.
+  const heldSrcRef = useRef<string | null>(null);
   const [preview, setPreview] = useState<PreviewState>({
     status: "loading",
     message: "Loading PDF preview...",
@@ -120,8 +126,16 @@ export function PdfPage({
   const [retryVersion, setRetryVersion] = useState(0);
 
   useEffect(() => {
+    return () => {
+      if (heldSrcRef.current) {
+        releasePdfDocument(heldSrcRef.current);
+        heldSrcRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     let disposed = false;
-    let heldSrc: string | null = null;
 
     async function renderPage() {
       setPreview({ status: "loading", message: "Loading PDF preview..." });
@@ -134,9 +148,9 @@ export function PdfPage({
 
         try {
           const pdfjs = await loadPdfJs();
-          if (heldSrc !== resolvedSrc) {
-            if (heldSrc) releasePdfDocument(heldSrc);
-            heldSrc = resolvedSrc;
+          if (heldSrcRef.current !== resolvedSrc || !pdfDocumentCache.has(resolvedSrc)) {
+            if (heldSrcRef.current) releasePdfDocument(heldSrcRef.current);
+            heldSrcRef.current = resolvedSrc;
             await acquirePdfDocument(pdfjs, resolvedSrc);
           }
           if (disposed) return;
@@ -171,9 +185,11 @@ export function PdfPage({
         } catch (error) {
           if (error instanceof Error && error.name === "RenderingCancelledException") return;
           lastError = error;
-          if (heldSrc) {
-            releasePdfDocument(heldSrc);
-            heldSrc = null;
+          // A failed load must not stay held: releasing lets the (already evicted)
+          // poisoned entry be fully dropped so the next attempt fetches fresh.
+          if (heldSrcRef.current) {
+            releasePdfDocument(heldSrcRef.current);
+            heldSrcRef.current = null;
           }
           if (!isRetryablePreviewError(error) || attempt === retryDelays.length - 1) break;
         }
@@ -188,7 +204,6 @@ export function PdfPage({
     return () => {
       disposed = true;
       renderTaskRef.current?.cancel();
-      if (heldSrc) releasePdfDocument(heldSrc);
     };
   }, [resolvedSrc, pageNumber, zoom, rotation, onReady, retryVersion]);
 

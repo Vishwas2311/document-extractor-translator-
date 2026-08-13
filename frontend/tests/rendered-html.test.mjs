@@ -25,10 +25,17 @@ test("server-renders the CareTranslate Studio shell", async () => {
   assert.match(html, /sample\.pdf/i);
   assert.match(html, /demo-thumbnail-page/i);
   assert.doesNotMatch(html, /react-loading-skeleton|Your site is taking shape/i);
-  const referralPosition = html.indexOf("Reason for referral");
+  // The demo shell opens on the inspector's Page view, which server-renders the demo
+  // result content in reading order: the referral block, then the structured table,
+  // then the consent block. The result-card ids are unique to the inspector list, so
+  // their positions are not confused with the thumbnail/viewer copies of the text.
+  const referralPosition = html.indexOf("result-p1-concern");
   const tablePosition = html.indexOf("Structured table 1");
-  const consentPosition = html.indexOf("I consent to this information");
+  const consentPosition = html.indexOf("result-p1-consent");
   assert.ok(referralPosition >= 0 && tablePosition > referralPosition && consentPosition > tablePosition);
+  // The demo blocks' source text itself is present in the server-rendered shell.
+  assert.match(html, /سبب الإحالة/);
+  assert.match(html, /أوافق على استخدام/);
 });
 
 test("keeps credentials out of the client configuration", async () => {

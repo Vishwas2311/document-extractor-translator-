@@ -75,6 +75,45 @@ def test_auditor_cannot_review() -> None:
         )
 
 
+@pytest.mark.parametrize("action", ["retry", "cancel"])
+def test_auditor_cannot_retry_or_cancel(action: str) -> None:
+    # Auditors have org-wide read, but retry/cancel mutate processing state
+    # and must stay owner-scoped. AuthorizationError maps to HTTP 403.
+    auditor = _principal(subject="audit-1", roles={ROLE_AUDITOR})
+    with pytest.raises(AuthorizationError, match="retry or cancel") as excinfo:
+        require_document_access(
+            auditor,
+            organization_id="org-local",
+            owner_subject="cw-1",
+            action=action,
+        )
+    assert excinfo.value.status_code == 403
+
+
+@pytest.mark.parametrize("action", ["retry", "cancel"])
+def test_owner_can_retry_and_cancel(action: str) -> None:
+    owner = _principal(subject="cw-1", roles={ROLE_CASEWORKER})
+    require_document_access(
+        owner,
+        organization_id="org-local",
+        owner_subject="cw-1",
+        action=action,
+    )
+
+
+@pytest.mark.parametrize("action", ["retry", "cancel"])
+def test_non_owner_reviewer_cannot_retry_or_cancel(action: str) -> None:
+    reviewer = _principal(subject="rev-1", roles={ROLE_REVIEWER})
+    with pytest.raises(AuthorizationError, match="retry or cancel"):
+        require_document_access(
+            reviewer,
+            organization_id="org-local",
+            owner_subject="cw-1",
+            document_review_status="needs_review",
+            action=action,
+        )
+
+
 def test_delete_requires_owner_or_admin() -> None:
     auditor = _principal(subject="audit-1", roles={ROLE_AUDITOR})
     with pytest.raises(AuthorizationError, match="not allowed to delete"):

@@ -32,6 +32,7 @@ from app.core.versioning import CURRENT_PROCESSING_VERSION
 from app.models.audit_event import AuditEvent
 from app.models.document import Document
 from app.models.financial_review import FinancialReview
+from app.models.idempotency import IdempotencyRecord
 from app.models.processing_job import ProcessingJob
 from app.models.translation_review import TranslationReview
 
@@ -144,6 +145,90 @@ class DocumentRepository:
             await session.refresh(event)
             return event
 
+    async def reserve_idempotency(
+        self, scope: str, request_hash: str
+    ) -> tuple[bool, IdempotencyRecord]:
+        """Reserve a scope before doing work.
+
+        Returns ``(True, record)`` when this caller now owns a fresh reservation and
+        must perform the work, or ``(False, record)`` when a record already exists
+        (either an in-flight reservation or a completed response to replay).
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        async with self.session_factory() as session:
+            record = IdempotencyRecord(
+                scope=scope, request_hash=request_hash, response_status=0
+            )
+            session.add(record)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                existing = await session.scalar(
+                    select(IdempotencyRecord).where(IdempotencyRecord.scope == scope)
+                )
+                if existing is None:  # pragma: no cover - lost row after unique violation
+                    raise
+                return False, existing
+            await session.refresh(record)
+            return True, record
+
+    async def complete_idempotency(
+        self,
+        scope: str,
+        *,
+        response_status: int,
+        response_body: str,
+        resource_id: str | None,
+    ) -> None:
+        async with self.session_factory() as session:
+            await session.execute(
+                update(IdempotencyRecord)
+                .where(IdempotencyRecord.scope == scope)
+                .values(
+                    response_status=response_status,
+                    response_body=response_body,
+                    resource_id=resource_id,
+                )
+            )
+            await session.commit()
+
+    async def release_idempotency(self, scope: str) -> None:
+        """Drop a reservation whose work failed so the client can retry cleanly."""
+        async with self.session_factory() as session:
+            await session.execute(
+                delete(IdempotencyRecord).where(
+                    IdempotencyRecord.scope == scope,
+                    IdempotencyRecord.response_status == 0,
+                )
+            )
+            await session.commit()
+
+    async def clear_stale_idempotency_reservations(self, *, max_age_seconds: int) -> int:
+        """Reclaim reservations orphaned by a crash/restart between
+        reserve_idempotency and complete_idempotency/release_idempotency.
+
+        Mirrors clear_stale_leases: an in-flight (response_status=0)
+        reservation older than max_age_seconds could not still belong to a
+        live request (a legitimate one always completes or releases well
+        within that window), so it's safe to delete and let a future retry
+        with the same key re-reserve cleanly.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=max_age_seconds)
+        async with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    delete(IdempotencyRecord).where(
+                        IdempotencyRecord.response_status == 0,
+                        IdempotencyRecord.created_at < cutoff,
+                    )
+                ),
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
     async def list_audit_events(
         self,
         *,
@@ -197,6 +282,49 @@ class DocumentRepository:
             if result.rowcount == 0:
                 raise DocumentNotFoundError("Document was not found.")
             await session.commit()
+
+    async def mark_retriable_document_failed(
+        self,
+        document_id: str,
+        *,
+        error_code: str,
+        safe_error_message: str,
+        completed_at: datetime,
+    ) -> bool:
+        """Mark a document failed only while it's still in a retriable status.
+
+        Used when reprocess/retranslate cleanup raises before any new job
+        exists (so there is no job_id to guard by, unlike
+        update_active_document). Guarding by status instead - mirroring
+        create_retry_job's own atomic guard - means a losing request in a
+        concurrent-retry race can never overwrite a document a *different*,
+        already-winning request has since moved past retriable (e.g. to
+        queued or further). Returns False (no-op) when that's already
+        happened, rather than raising - losing this race is an expected,
+        harmless outcome, not an error.
+        """
+        retriable = [status.value for status in RETRIABLE_DOCUMENT_STATUSES]
+        async with self.session_factory() as session:
+            result = cast(
+                CursorResult[Any],
+                await session.execute(
+                    update(Document)
+                    .where(
+                        Document.id == document_id,
+                        Document.status.in_(retriable),
+                    )
+                    .values(
+                        status=DocumentStatus.FAILED.value,
+                        current_stage=DocumentStatus.FAILED.value,
+                        error_code=error_code,
+                        safe_error_message=safe_error_message,
+                        completed_at=completed_at,
+                        updated_at=datetime.now(UTC),
+                    )
+                ),
+            )
+            await session.commit()
+            return bool(result.rowcount)
 
     async def _latest_job_locked(self, session: AsyncSession, document_id: str) -> ProcessingJob:
         job = await session.scalar(
@@ -613,6 +741,20 @@ class DocumentRepository:
             "updated_at": datetime.now(UTC),
             "processing_version": CURRENT_PROCESSING_VERSION,
         }
+        # Stale review verdicts must not survive a retry that regenerates the
+        # results they were bound to. Review rows themselves stay (append-only).
+        reset_translation_review: dict[str, object] = {
+            "translation_result_sha256": None,
+            "translation_review_status": None,
+            "translation_reviewed_by": None,
+            "translation_reviewed_at": None,
+        }
+        reset_financial_review: dict[str, object] = {
+            "financial_result_sha256": None,
+            "financial_review_status": None,
+            "financial_reviewed_by": None,
+            "financial_reviewed_at": None,
+        }
         if mode == RetryMode.REPROCESS:
             document_values.update(
                 {
@@ -623,18 +765,20 @@ class DocumentRepository:
                     "uncertain_page_count": None,
                     "financial_table_count": None,
                     "financial_issue_count": None,
-                    "financial_result_sha256": None,
-                    "financial_review_status": None,
-                    "financial_reviewed_by": None,
-                    "financial_reviewed_at": None,
                     "source_languages": [],
+                    **reset_financial_review,
+                    **reset_translation_review,
                 }
             )
         elif mode == RetryMode.RETRANSLATE:
+            # The financial result hash changes too: financial cells embed
+            # translated text, so its review summary is stale after retranslation.
             document_values.update(
                 {
                     "translation_batches_done": None,
                     "translation_batches_total": None,
+                    **reset_financial_review,
+                    **reset_translation_review,
                 }
             )
         async with self.session_factory() as session:
@@ -645,13 +789,37 @@ class DocumentRepository:
                     .where(
                         Document.id == document_id,
                         Document.status.in_(retriable),
+                        # Atomic guard against the approve/retry race: an approval
+                        # committed after the service-level check must still block
+                        # the retry from destroying the approved result.
+                        or_(
+                            Document.financial_review_status.is_(None),
+                            Document.financial_review_status != "approved",
+                        ),
+                        or_(
+                            Document.translation_review_status.is_(None),
+                            Document.translation_review_status != "approved",
+                        ),
+                        or_(
+                            Document.document_review_status.is_(None),
+                            Document.document_review_status != "approved",
+                        ),
                     )
                     .values(**document_values)
                 ),
             )
             if result.rowcount == 0:
-                if await session.get(Document, document_id) is None:
+                document = await session.get(Document, document_id)
+                if document is None:
                     raise DocumentNotFoundError("Document was not found.")
+                if "approved" in {
+                    document.financial_review_status,
+                    document.translation_review_status,
+                    document.document_review_status,
+                }:
+                    raise ConflictError(
+                        "Approved results cannot be overwritten by retry."
+                    )
                 raise ConflictError(
                     "Only failed, cancelled, or reviewable documents can be retried."
                 )
