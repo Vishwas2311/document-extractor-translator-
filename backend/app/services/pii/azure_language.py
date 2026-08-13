@@ -17,9 +17,17 @@ from __future__ import annotations
 
 import bisect
 from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING
 
 from app.core.exceptions import PolicyBlockedError
 from app.services.pii.base import PiiSpan
+
+if TYPE_CHECKING:
+    # Only for type-checking - the real azure-ai-textanalytics/azure-identity
+    # SDKs are imported lazily at runtime (see _default_recognizer/_credential)
+    # so the rest of the app runs without the optional dependency installed.
+    from azure.core.credentials import AzureKeyCredential
+    from azure.core.credentials_async import AsyncTokenCredential
 
 Recognizer = Callable[[list[dict[str, str]]], Awaitable[list[list[PiiSpan]]]]
 
@@ -102,15 +110,25 @@ class AzureLanguagePiiDetector:
         self, documents: list[dict[str, str]]
     ) -> list[list[PiiSpan]]:
         try:
-            from azure.ai.textanalytics.aio import (  # type: ignore[import-untyped]
-                TextAnalyticsClient,
-            )
+            from azure.ai.textanalytics.aio import TextAnalyticsClient
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise PolicyBlockedError(
                 "The Azure AI Language SDK is not installed in this build.",
                 details={"service": "azure_language"},
             ) from exc
 
+        # detect_batch already guarantees self._endpoint is set before any
+        # recognizer runs, but that guard lives in a different method than
+        # this one - re-asserting it here narrows the type for mypy and
+        # keeps the fail-closed contract self-contained if this method is
+        # ever called directly.
+        endpoint = self._endpoint
+        if not endpoint:
+            raise PolicyBlockedError(
+                "Multilingual PII detection is selected but the Azure AI Language "
+                "endpoint is not configured. Failing closed.",
+                details={"service": "azure_language"},
+            )
         credential = self._credential()
         # Azure returns entity offsets/lengths as UTF-16 code units - convert
         # to Python string indices (see utf16_code_unit_offsets) so downstream
@@ -118,7 +136,13 @@ class AzureLanguagePiiDetector:
         # on the correct characters even when astral-plane characters (rare
         # emoji, some CJK extensions) precede an entity.
         text_by_index = [document["text"] for document in documents]
-        async with TextAnalyticsClient(self._endpoint, credential) as client:
+        # Call recognize_pii_entities on `client` directly rather than on
+        # `async with ... as client`'s bound name - the SDK's own __aenter__
+        # is typed to return the base class (missing recognize_pii_entities
+        # in its stub), even though it returns `self` at runtime. Using the
+        # original reference sidesteps that stub imprecision.
+        client = TextAnalyticsClient(endpoint, credential)
+        async with client:
             response = await client.recognize_pii_entities(documents)
             spans_by_doc: list[list[PiiSpan]] = []
             for doc_index, document in enumerate(response):
@@ -142,7 +166,7 @@ class AzureLanguagePiiDetector:
                 )
             return spans_by_doc
 
-    def _credential(self) -> object:
+    def _credential(self) -> AzureKeyCredential | AsyncTokenCredential:
         if self._azure_auth_mode == "managed_identity":
             from azure.identity.aio import DefaultAzureCredential
 
