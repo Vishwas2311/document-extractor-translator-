@@ -272,6 +272,60 @@ async def test_rejected_financial_review_writes_no_reviewed_exports(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_approved_financial_review_not_committed_when_export_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Regression: the review record (and hence financial_review_status =
+    "approved") must not be persisted if writing the reviewed exports fails -
+    otherwise the document is stuck permanently "approved" with missing/broken
+    downloads. Writing exports before the DB commit (this session's fix)
+    means a write failure here must leave the document's review status and
+    the review audit trail completely untouched."""
+    document_id = "doc-financial-write-fails"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    result = _financial_result(document_id)
+    await storage.write_json(
+        document_id, "normalized/financial.json", result.model_dump(mode="json")
+    )
+    await storage.write_json(
+        document_id, "manifest.json", {"artifacts": ["normalized/financial.json"]}
+    )
+    document = _document(document_id, stored_sha256=financial_result_sha256(result))
+    repository = _FinancialReviewRepository(document)
+
+    class _FailingStorage(LocalArtifactStorage):
+        async def write_bytes(self, document_id: str, relative_path: str, content: bytes) -> Path:
+            if relative_path == REVIEWED_FINANCIAL_XLSX_PATH:
+                raise OSError("simulated disk failure writing XLSX export")
+            return await super().write_bytes(document_id, relative_path, content)
+
+    failing_storage = _FailingStorage(tmp_path / "artifacts")
+    container = SimpleNamespace(repository=repository, storage=failing_storage)
+
+    with pytest.raises(OSError, match="simulated disk failure"):
+        await create_financial_review(
+            _request(container),
+            document_id,
+            FinancialReviewCreate(
+                decision="approved",
+                note="Should not commit",
+                corrections=[
+                    {
+                        "cell_id": "c1",
+                        "normalized_value": "1234.56",
+                        "currency": "CNY",
+                        "reason": "Confirmed with source page header",
+                    }
+                ],
+            ),
+        )
+
+    assert document.financial_review_status is None
+    assert repository.persisted == []
+
+
+@pytest.mark.asyncio
 async def test_financial_review_conflicts_when_stored_hash_differs_from_artifact(
     tmp_path: Path,
 ) -> None:

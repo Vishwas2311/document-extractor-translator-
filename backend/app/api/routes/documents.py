@@ -591,6 +591,26 @@ async def create_financial_review(
 
     principal = cast(AuthPrincipal, request.state.principal)
     now = datetime.now(UTC)
+    # Materialize the reviewed exports BEFORE the review record commits, and
+    # only for approvals. A failed or rejected review must leave no
+    # reviewed-financial artifacts behind. Each write is atomic (temp file +
+    # rename), so readers never observe a partial file. Writing first means a
+    # failed write here leaves the document's review status untouched instead
+    # of stuck "approved" with missing/broken exports - the repository call
+    # below is what actually commits the approval, and it re-validates the
+    # result hash itself, so a write that raced a stale artifact still fails
+    # safely at that point.
+    if review.decision == "approved":
+        reviewed_result = apply_financial_corrections(result, review.corrections)
+        await services.storage.write_json(
+            document_id, REVIEWED_FINANCIAL_JSON_PATH, reviewed_result.model_dump(mode="json")
+        )
+        await services.storage.write_text(
+            document_id, REVIEWED_FINANCIAL_CSV_PATH, financial_result_csv(reviewed_result)
+        )
+        await services.storage.write_bytes(
+            document_id, REVIEWED_FINANCIAL_XLSX_PATH, financial_result_xlsx(reviewed_result)
+        )
     persisted = await services.repository.create_financial_review(
         FinancialReview(
             document_id=document_id,
@@ -609,21 +629,6 @@ async def create_financial_review(
             created_at=now,
         )
     )
-    # Materialize the reviewed exports only after the review record committed,
-    # and only for approvals. A failed or rejected review must leave no
-    # reviewed-financial artifacts behind. Each write is atomic (temp file +
-    # rename), so readers never observe a partial file.
-    if review.decision == "approved":
-        reviewed_result = apply_financial_corrections(result, review.corrections)
-        await services.storage.write_json(
-            document_id, REVIEWED_FINANCIAL_JSON_PATH, reviewed_result.model_dump(mode="json")
-        )
-        await services.storage.write_text(
-            document_id, REVIEWED_FINANCIAL_CSV_PATH, financial_result_csv(reviewed_result)
-        )
-        await services.storage.write_bytes(
-            document_id, REVIEWED_FINANCIAL_XLSX_PATH, financial_result_xlsx(reviewed_result)
-        )
     await _record_audit(
         request,
         action=f"financial.review.{review.decision}",
@@ -702,6 +707,20 @@ async def create_translation_review(
     validate_translation_approval(bilingual, review)
 
     now = datetime.now(UTC)
+    # Materialize the reviewed export BEFORE the review record commits, and
+    # only for approvals. A failed or rejected review must leave no
+    # reviewed-bilingual artifact behind. The write itself is atomic
+    # (temp file + rename), so readers never observe a partial file. Writing
+    # first means a failed write here leaves the document's review status
+    # untouched instead of stuck "approved" with a missing export - the
+    # repository call below is what actually commits the approval, and it
+    # re-validates the result hash itself, so a write that raced a stale
+    # artifact still fails safely at that point.
+    if review.decision == "approved":
+        reviewed_payload = apply_translation_corrections(bilingual, review.corrections)
+        await services.storage.write_json(
+            document_id, REVIEWED_BILINGUAL_PATH, reviewed_payload
+        )
     persisted = await services.repository.create_translation_review(
         TranslationReview(
             document_id=document_id,
@@ -715,15 +734,6 @@ async def create_translation_review(
             created_at=now,
         )
     )
-    # Materialize the reviewed export only after the review record committed,
-    # and only for approvals. A failed or rejected review must leave no
-    # reviewed-bilingual artifact behind. The write itself is atomic
-    # (temp file + rename), so readers never observe a partial file.
-    if review.decision == "approved":
-        reviewed_payload = apply_translation_corrections(bilingual, review.corrections)
-        await services.storage.write_json(
-            document_id, REVIEWED_BILINGUAL_PATH, reviewed_payload
-        )
     await AuditService(services.repository).record(
         organization_id=principal.organization_id,
         actor_subject=principal.subject,

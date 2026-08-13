@@ -221,6 +221,57 @@ def _document(document_id: str, stored_sha256: str | None) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+async def test_approved_translation_review_not_committed_when_export_write_fails(
+    tmp_path: Path,
+) -> None:
+    """Regression: the review record must not be persisted if writing the
+    reviewed bilingual export fails - otherwise the document is stuck
+    permanently "approved" with a missing download. Writing the export before
+    the DB commit (this session's fix) means a write failure here must leave
+    the document's review status and the review audit trail untouched."""
+    document_id = "doc-translation-write-fails"
+    storage = LocalArtifactStorage(tmp_path / "artifacts")
+    storage.ensure_document_dirs(document_id)
+    bilingual = _bilingual_fixture(document_id, review_required=True)
+    await storage.write_json(document_id, "exports/bilingual-document.json", bilingual)
+    document = _document(document_id, stored_sha256=bilingual_result_sha256(bilingual))
+    repository = _TranslationReviewRepository(document)
+
+    class _FailingStorage(LocalArtifactStorage):
+        async def write_json(
+            self, document_id: str, relative_path: str, payload: dict[str, object]
+        ) -> Path:
+            if relative_path == REVIEWED_BILINGUAL_PATH:
+                raise OSError("simulated disk failure writing reviewed bilingual export")
+            return await super().write_json(document_id, relative_path, payload)
+
+    failing_storage = _FailingStorage(tmp_path / "artifacts")
+    container = SimpleNamespace(repository=repository, storage=failing_storage)
+
+    with pytest.raises(OSError, match="simulated disk failure"):
+        await create_translation_review(
+            _request(container),
+            document_id,
+            TranslationReviewCreate(
+                decision="approved",
+                note="Should not commit",
+                corrections=[
+                    {
+                        "target_kind": "block",
+                        "target_id": "b1",
+                        "page_number": 1,
+                        "corrected_translated_text": "Approved English",
+                        "reason": "Clarity",
+                    }
+                ],
+            ),
+        )
+
+    assert document.document_review_status == "needs_review"
+    assert repository.persisted == []
+
+
+@pytest.mark.asyncio
 async def test_translation_review_conflicts_when_stored_hash_differs_from_artifact(
     tmp_path: Path,
 ) -> None:
