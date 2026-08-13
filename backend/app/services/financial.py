@@ -237,6 +237,15 @@ IDENTIFIER_CONTEXT_RE = re.compile(
     r"\u8bc1\u4ef6\u53f7\u7801|\u7f16\u53f7|\u7de8\u865f|\u0631\u0642\u0645\s*\u0627\u0644\u0645\u0639\u0627\u0645\u0644\u0629)",
     re.IGNORECASE,
 )
+# Footnote/note-reference columns (Traditional/Simplified "Note N") are common on nearly every
+# line item in a Chinese financial statement's notes section. Deliberately NOT folded into
+# IDENTIFIER_CONTEXT_RE: that pattern is checked against label_context, which includes the
+# PRECEDING cell's content - correct for genuine label-then-value pairs (e.g. "Transaction ID"
+# label followed by the ID value), but wrong here, since the very common real layout is
+# "row label | note-ref | amount" - checking the amount cell's preceding label would catch the
+# note-ref cell's own text and misclassify the unrelated amount cell right next to it as an
+# identifier too. This is checked only against a cell's OWN text/column header instead.
+NOTE_REFERENCE_RE = re.compile(r"\u9644\u8a3b|\u9644\u6ce8")
 MEASUREMENT_UNIT_RE = re.compile(
     r"(?:mg\s*/\s*l|g\s*/\s*l|mmol\s*/\s*l|mol\s*/\s*l|"
     r"mmhg|kpa|bpm|kg|cm|mm|\u00b0\s*c|\u00b0\s*f|"
@@ -1207,6 +1216,9 @@ class FinancialExtractionService:
         ]
         context = " | ".join([*same_row, *column_headers])
         label_context = " | ".join([text, *preceding_labels, *column_headers])
+        # Deliberately excludes preceding_labels (see NOTE_REFERENCE_RE's definition above) -
+        # only this cell's own text and its own column header identify it as a note reference.
+        own_context = " | ".join([text, *column_headers])
         explicit_currency = bool(
             CURRENCY_CODE_RE.search(text)
             or any(symbol in text for symbol in CURRENCY_SYMBOL_CANDIDATES)
@@ -1225,6 +1237,8 @@ class FinancialExtractionService:
             and digit_count
         ):
             return "identifier"
+        if NOTE_REFERENCE_RE.search(own_context) and digit_count:
+            return "identifier"
         if DATE_OR_TIME_RE.search(text):
             return "date_or_time"
         if MEASUREMENT_UNIT_RE.search(context) and cls._numeric_candidate(text) is not None:
@@ -1233,7 +1247,17 @@ class FinancialExtractionService:
             return "quantity"
         if text.endswith("%") and text.count("%") == 1:
             return "percentage"
-        if digit_count and (explicit_currency or MONETARY_CONTEXT_RE.search(label_context)):
+        # Unlike the sibling context-based branches above (measurement, quantity), this one
+        # used to skip the _numeric_candidate() shape check - a nearby monetary-context label
+        # (e.g. an accounts-receivable row) was enough on its own to classify ANY digit-bearing
+        # neighbor cell as a monetary amount, including non-numeric text like a footnote/note
+        # reference ("Note 5") that merely contains a digit. Requiring the cell's own content to
+        # actually look numeric closes that gap without weakening genuine currency detection.
+        if (
+            digit_count
+            and (explicit_currency or MONETARY_CONTEXT_RE.search(label_context))
+            and cls._numeric_candidate(text) is not None
+        ):
             return "monetary_amount"
         if cls._numeric_candidate(text) is not None:
             return "unknown_numeric"
