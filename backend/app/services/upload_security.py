@@ -94,4 +94,12 @@ def assert_pdf_safe(path: Path, *, max_pages: int) -> int | None:
         # confirm," not "there are none" - falls through to `page_count or None` below,
         # same as the pre-existing "unknown page count" behavior.
         raise InvalidDocumentError("The PDF has no readable pages.")
+    if not trusted:
+        # An untrusted (heuristic-fallback) count must never impersonate a real
+        # estimate downstream - callers treat a non-None page_count as trustworthy
+        # and size Document Intelligence page ranges to it, which would silently
+        # truncate extraction if this count undercounts a real, larger document.
+        # Returning None routes callers to the existing adaptive-discovery path
+        # instead, which safely handles a fully-unknown page count.
+        return None
     return page_count or None

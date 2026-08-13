@@ -101,3 +101,25 @@ def test_assert_pdf_safe_does_not_reject_an_unparseable_pdf_the_heuristic_underc
     path.write_bytes(b"%PDF-1.7\n" + (b"\x00\x01\x02not-a-real-object-stream" * 50))
 
     assert assert_pdf_safe(path, max_pages=300) is None
+
+
+def test_assert_pdf_safe_does_not_trust_a_nonzero_heuristic_undercount(
+    tmp_path: Path,
+) -> None:
+    """A real-world large scanned PDF that pypdf cannot parse (compressed xref
+    streams) can still have literal `/Type /Page` bytes scattered through its
+    unparsed content - the heuristic fallback then finds a nonzero but wrong
+    count. Trusting that number downstream sizes Document Intelligence page
+    ranges to it and silently truncates extraction past the true page count.
+    The heuristic result must stay untrusted (None) regardless of whether it
+    lands on zero or some other wrong number."""
+    path = tmp_path / "unparseable-with-scattered-markers.pdf"
+    # No valid xref/trailer pypdf can follow (forces the fallback), but the
+    # byte stream happens to contain several literal "/Type /Page" markers -
+    # the heuristic counts these as if they were real pages.
+    filler = b"\x00\x01\x02not-a-real-object-stream"
+    page_marker = b" /Type /Page "
+    body = (filler + page_marker) * 5
+    path.write_bytes(b"%PDF-1.7\n" + body)
+
+    assert assert_pdf_safe(path, max_pages=300) is None
