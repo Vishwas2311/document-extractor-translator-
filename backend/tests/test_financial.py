@@ -580,6 +580,105 @@ def test_only_ambiguous_monetary_values_require_normalized_corrections() -> None
     } == {"amount-ambiguous"}
 
 
+def test_footnote_reference_column_is_not_misclassified_as_a_monetary_amount() -> None:
+    # Regression: real Chinese annual reports have a Note/附註 reference column next
+    # to nearly every line item in the notes section. The row's own monetary-context label
+    # (e.g. 應收賬款 / accounts receivable) used to be enough on its own to sweep
+    # ANY digit-bearing neighbor cell into monetary_amount classification - including the
+    # non-numeric note-reference marker itself - which then failed numeric parsing and got
+    # flagged "malformed_monetary_value", and (via the intentional "one bad cell poisons the
+    # whole table's separator inference" rule) could also push otherwise well-formed amounts
+    # in the same table into needing review. Two real-world shapes are covered: the marker
+    # embedded directly in the cell ("附註5"), and a bare digit whose note-ness is only
+    # signaled by the column header.
+    classification = FinancialClassificationResult(
+        document_id="doc-footnote-column",
+        classifier_id="test",
+        classifier_version="1",
+        source_page_count=1,
+        pages=[
+            FinancialPageClassification(
+                page_number=1,
+                label="financial_table",
+                confidence=0.99,
+                disposition=FinancialPageDisposition.FINANCIAL,
+                selected=True,
+                source="azure_custom_classifier",
+            )
+        ],
+    )
+    cells = [
+        # Header row.
+        TableCell(
+            cell_id="h-item", row_index=0, column_index=0, content="Item",
+            kind="columnHeader", bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="h-note", row_index=0, column_index=1, content="附註",
+            kind="columnHeader", bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="h-amount", row_index=0, column_index=2, content="Amount",
+            kind="columnHeader", bounding_regions=[_region(1)],
+        ),
+        # Data row 1: note-reference marker embedded directly in the cell.
+        TableCell(
+            cell_id="label-1", row_index=1, column_index=0, content="應收賬款",
+            bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="note-in-cell", row_index=1, column_index=1, content="附註5",
+            bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="amount-1", row_index=1, column_index=2, content="1,234,567",
+            bounding_regions=[_region(1)],
+        ),
+        # Data row 2: bare-digit note reference, note-ness signaled only by the column header.
+        TableCell(
+            cell_id="label-2", row_index=2, column_index=0, content="應付賬款",
+            bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="note-bare-digit", row_index=2, column_index=1, content="5",
+            bounding_regions=[_region(1)],
+        ),
+        TableCell(
+            cell_id="amount-2", row_index=2, column_index=2, content="2,345,678",
+            bounding_regions=[_region(1)],
+        ),
+    ]
+    document = CanonicalDocument(
+        document_id="doc-footnote-column",
+        filename="synthetic.pdf",
+        status="normalizing",
+        pages=[
+            PageMetadata(
+                page_number=1, page_count=1, width=8.5, height=11, unit="inch",
+                source_text="Synthetic notes table with footnote references",
+            )
+        ],
+        tables=[
+            TableResult(table_id="notes-table", row_count=3, column_count=3, cells=cells)
+        ],
+    )
+
+    result = FinancialExtractionService().build(
+        document, classification, processing_version="footnote-1"
+    )
+    values = {cell.cell_id: cell.value for cell in result.tables[0].cells}
+
+    for note_cell_id in ("note-in-cell", "note-bare-digit"):
+        assert values[note_cell_id].semantic_type != "monetary_amount", note_cell_id
+        assert not values[note_cell_id].requires_normalized_correction, note_cell_id
+
+    # The amount cells right next to the note-reference column must still classify and
+    # normalize correctly - the fix must not collaterally misclassify them too.
+    for amount_cell_id in ("amount-1", "amount-2"):
+        assert values[amount_cell_id].semantic_type == "monetary_amount", amount_cell_id
+        assert not values[amount_cell_id].requires_normalized_correction, amount_cell_id
+
+
 def test_numeric_normalization_rejects_malformed_wrappers_and_mixed_currency() -> None:
     service = FinancialExtractionService()
 
