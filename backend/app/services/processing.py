@@ -708,13 +708,19 @@ class ProcessingService:
             # translated correctly and cost extra API calls for no reason - and not
             # just re-serving the same cached bad result forever either.
             retry_inputs = [item for item in inputs if item.block_id in invalid]
+            retry_block_ids = {item.block_id for item in retry_inputs}
             retry_request = TranslationBatchRequest(
                 target_language=request.target_language, blocks=retry_inputs
             )
             fresh_response = await self.translator.translate(retry_request)
             merged_by_id = {item.block_id: item for item in cached_response.translations}
             for item in fresh_response.translations:
-                merged_by_id[item.block_id] = item
+                # Only accept results for the block(s) we actually re-requested - a
+                # malformed response that echoes back extra/wrong block_ids must not
+                # overwrite a different, never-retried block's already-valid cached
+                # translation.
+                if item.block_id in retry_block_ids:
+                    merged_by_id[item.block_id] = item
             response = TranslationBatchResponse(
                 translations=[merged_by_id[item.block_id] for item in inputs]
             )
