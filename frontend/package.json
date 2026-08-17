@@ -9,10 +9,10 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "test:unit": "vitest run",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern public/pdf.worker.min.mjs",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package && node scripts/copy-pdfjs-assets.mjs"
   },
   "dependencies": {
     "next": "16.3.0",

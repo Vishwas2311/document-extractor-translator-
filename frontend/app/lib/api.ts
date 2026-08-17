@@ -2,6 +2,7 @@ import type {
   DocumentCreateResponse,
   DocumentDetail,
   DocumentListResponse,
+  HealthDependencies,
   HealthStatus,
   FinancialCorrection,
   FinancialReviewHistory,
@@ -20,6 +21,7 @@ import {
   isDocumentCreateResponse,
   isDocumentDetail,
   isDocumentListResponse,
+  isHealthDependencies,
   isHealthStatus,
   isFinancialResult,
   isFinancialReviewHistory,
@@ -271,12 +273,19 @@ export function uploadDocument(
 ): Promise<DocumentCreateResponse> {
   const formData = new FormData();
   formData.append("file", file);
+  // Large uploads legitimately take far longer than the default request timeout.
+  // Scale with file size assuming a ~50 KB/s worst-case link, floored at 2 minutes
+  // and capped at 30 minutes. The caller's abort signal (Cancel) still applies.
+  const uploadTimeoutMs = Math.min(
+    30 * 60_000,
+    Math.max(120_000, Math.ceil(file.size / (50 * 1024)) * 1000),
+  );
   return apiFetch(
     "/documents",
     isDocumentCreateResponse,
     "document upload",
     { method: "POST", body: formData },
-    options,
+    { ...options, timeoutMs: options?.timeoutMs ?? uploadTimeoutMs },
   );
 }
 
@@ -363,6 +372,12 @@ export function createFinancialReview(
     corrections: FinancialCorrection[];
     structure_decisions: FinancialStructureDecision[];
   },
+  // Optimistic-concurrency guard: the server rejects a stale save (the result
+  // changed underneath the reviewer) with 409 instead of silently overwriting
+  // it. `null`/absent (e.g. a document's first-ever review, before a hash has
+  // ever been persisted) skips the header - the server only requires it when
+  // APP_ENV=production, which this local build never sets.
+  ifMatch?: string | null,
   options?: RequestOptions,
 ): Promise<FinancialReviewRecord> {
   return apiFetch(
@@ -371,7 +386,10 @@ export function createFinancialReview(
     "financial review decision",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(ifMatch ? { "If-Match": `"${ifMatch}"` } : {}),
+      },
       body: JSON.stringify(review),
     },
     options,
@@ -398,6 +416,9 @@ export function createTranslationReview(
     note?: string | null;
     corrections: TranslationCorrection[];
   },
+  // See createFinancialReview's ifMatch comment - same optimistic-concurrency
+  // contract, same reason `null`/absent is safe to send.
+  ifMatch?: string | null,
   options?: RequestOptions,
 ): Promise<TranslationReviewRecord> {
   return apiFetch(
@@ -406,7 +427,10 @@ export function createTranslationReview(
     "translation review decision",
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(ifMatch ? { "If-Match": `"${ifMatch}"` } : {}),
+      },
       body: JSON.stringify(review),
     },
     options,
@@ -447,6 +471,23 @@ export function checkHealth(options?: RequestOptions): Promise<HealthStatus> {
   return apiFetch("/health/ready", isHealthStatus, "health status", undefined, options);
 }
 
+/**
+ * Service-configuration flags (Document Intelligence / Azure OpenAI configured or
+ * not). Deliberately separate from checkHealth(): /health/ready is unauthenticated
+ * and content-free by design, so this detail lives behind auth on /health/dependencies.
+ */
+export function checkHealthDependencies(
+  options?: RequestOptions,
+): Promise<HealthDependencies> {
+  return apiFetch(
+    "/health/dependencies",
+    isHealthDependencies,
+    "health dependencies",
+    undefined,
+    options,
+  );
+}
+
 export function checkSession(options?: RequestOptions): Promise<SessionStatus> {
   return apiFetch("/health/session", isSessionStatus, "session status", undefined, options);
 }
@@ -474,7 +515,10 @@ export function downloadUrl(
     | "financial"
     | "financial-csv"
     | "financial-xlsx"
-    | "financial-validation",
+    | "financial-validation"
+    | "reviewed-financial"
+    | "reviewed-financial-csv"
+    | "reviewed-financial-xlsx",
   pageNumber?: number,
 ): string {
   const query = artifact === "page" && pageNumber ? "?page=" + pageNumber : "";
@@ -505,7 +549,10 @@ export async function downloadArtifact(
     | "financial"
     | "financial-csv"
     | "financial-xlsx"
-    | "financial-validation",
+    | "financial-validation"
+    | "reviewed-financial"
+    | "reviewed-financial-csv"
+    | "reviewed-financial-xlsx",
   pageNumber?: number,
   options?: RequestOptions,
 ): Promise<void> {
@@ -517,19 +564,30 @@ export async function downloadArtifact(
   );
   const blob = await response.blob();
   const disposition = response.headers.get("Content-Disposition") ?? "";
-  const matched = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(disposition);
-  const filename = matched
-    ? decodeURIComponent(matched[1].replace(/"/g, ""))
-    : artifact + (artifact === "page" && pageNumber ? "-" + pageNumber : "") + ".json";
-  const url = URL.createObjectURL(blob);
-  try {
-    const link = window.document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.click();
-  } finally {
-    URL.revokeObjectURL(url);
+  // Only the RFC 5987 `filename*=UTF-8''...` form is percent-encoded; a plain
+  // `filename="..."` may legitimately contain a stray `%`, so it must not be
+  // percent-decoded (decodeURIComponent would throw a URIError).
+  const encodedMatch = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+  const plainMatch = /filename="?([^";]+)"?/i.exec(disposition);
+  let filename =
+    artifact + (artifact === "page" && pageNumber ? "-" + pageNumber : "") + ".json";
+  if (encodedMatch) {
+    try {
+      filename = decodeURIComponent(encodedMatch[1]);
+    } catch {
+      filename = encodedMatch[1];
+    }
+  } else if (plainMatch) {
+    filename = plainMatch[1];
   }
+  const url = URL.createObjectURL(blob);
+  const link = window.document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  // Revoking immediately after click() can cancel a download that hasn't started
+  // streaming yet; give the browser time to open the blob first.
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 export function retryDocument(

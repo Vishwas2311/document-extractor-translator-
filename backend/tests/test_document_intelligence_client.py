@@ -162,6 +162,45 @@ async def test_analyze_deletes_result_with_model_and_result_ids(tmp_path: Path) 
     assert client.deleted == [("prebuilt-layout", "result-123")]
 
 
+class BlockedDeleteDocumentIntelligenceClient(FakeDocumentIntelligenceClient):
+    """Deletion blocks until the test releases it, so the deletion task is still
+    pending when close() runs - proving close() drains tracked tasks instead of
+    letting them be garbage-collected unawaited."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.closed = False
+
+    async def delete_analyze_result(self, model_id: str, result_id: str) -> None:
+        await self.release.wait()
+        await super().delete_analyze_result(model_id, result_id)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_close_drains_pending_result_deletion_tasks(tmp_path: Path) -> None:
+    source = tmp_path / "synthetic.pdf"
+    source.write_bytes(b"%PDF-synthetic")
+    analyzer = DocumentIntelligenceAnalyzer(make_settings(tmp_path))
+    client = BlockedDeleteDocumentIntelligenceClient()
+    analyzer._client = client  # type: ignore[assignment]
+
+    await analyzer.analyze(source)
+    assert len(analyzer._pending_deletes) == 1
+    assert client.deleted == []
+
+    client.release.set()
+    await analyzer.close()
+
+    # close() awaited the tracked task before closing the client.
+    assert client.deleted == [("prebuilt-layout", "result-123")]
+    assert analyzer._pending_deletes == set()
+    assert client.closed
+
+
 @pytest.mark.asyncio
 async def test_classifier_does_not_call_document_model_deletion(tmp_path: Path) -> None:
     source = tmp_path / "synthetic.pdf"

@@ -11,11 +11,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
 from app.core.config import get_settings
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, AuthenticationError, AuthorizationError
 from app.core.logging import configure_logging
 from app.dependencies.services import create_container
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_context import RequestContextMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.services.audit import AuditService
 
 settings = get_settings()
 configure_logging(settings.log_level, settings.log_format == "json")
@@ -51,21 +53,78 @@ app = FastAPI(
     redoc_url="/redoc" if settings.docs_enabled else None,
     openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
-app.add_middleware(RequestContextMiddleware)
+# add_middleware prepends, so RateLimitMiddleware is added first to make
+# RequestContextMiddleware execute first: 429 responses then carry a real
+# request id (state + x-request-id header) instead of "unknown".
 app.add_middleware(RateLimitMiddleware, settings=settings)
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-Request-ID", "If-None-Match", "Authorization"],
-    expose_headers=["ETag", "X-Request-ID", "Cache-Control"],
+    allow_headers=[
+        "Content-Type",
+        "X-Request-ID",
+        "If-None-Match",
+        "If-Match",
+        "Idempotency-Key",
+        "Authorization",
+    ],
+    expose_headers=[
+        "ETag",
+        "X-Request-ID",
+        "Cache-Control",
+        "Retry-After",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+    ],
 )
+# Added last so it is the outermost layer: every response, including CORS
+# preflight, rate-limit 429s, and error handlers, carries security headers.
+app.add_middleware(SecurityHeadersMiddleware)
 app.include_router(api_router, prefix=settings.api_v1_prefix)
+
+
+async def _audit_auth_failure(request: Request, exc: AppError) -> None:
+    """Record a content-free audit event for authentication/authorization denials.
+
+    Successful, security-relevant mutations are already audited at their routes.
+    Here we capture the negative signal (401/403) so probing and misconfiguration
+    are visible. Never let an audit write failure change the client response.
+    """
+    if not isinstance(exc, (AuthenticationError, AuthorizationError)):
+        return
+    container = getattr(request.app.state, "container", None)
+    repository = getattr(container, "repository", None)
+    if repository is None or not hasattr(repository, "create_audit_event"):
+        return
+    principal = getattr(request.state, "principal", None)
+    actor = getattr(principal, "subject", None) or "unknown"
+    organization_id = getattr(principal, "organization_id", None) or "unknown"
+    action = "auth.denied" if isinstance(exc, AuthorizationError) else "auth.failed"
+    try:
+        await AuditService(repository).record(
+            organization_id=organization_id,
+            actor_subject=actor,
+            action=action,
+            resource_type="session",
+            resource_id=request.url.path[:64],
+            result="failure",
+            correlation_id=getattr(request.state, "request_id", None),
+            detail=exc.code,
+        )
+    except Exception:  # noqa: BLE001 - auditing must never break the response
+        await logger.awarning(
+            "auth_audit_write_failed",
+            request_id=getattr(request.state, "request_id", "unknown"),
+            path=request.url.path,
+        )
 
 
 @app.exception_handler(AppError)
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+    await _audit_auth_failure(request, exc)
     # Only expose allowlisted detail keys to clients.
     public_details = {
         key: value

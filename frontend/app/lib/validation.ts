@@ -8,6 +8,7 @@ import type {
   FinancialResult,
   FinancialReviewHistory,
   FinancialReviewRecord,
+  HealthDependencies,
   HealthStatus,
   PageResult,
   PageSummary,
@@ -283,31 +284,37 @@ export function isDocumentListResponse(value: unknown): value is DocumentListRes
 }
 
 export function isHealthStatus(value: unknown): value is HealthStatus {
-  if (
-    !isObject(value) ||
-    !isString(value.status) ||
-    !isObject(value.azure_configured) ||
-    !isBoolean(value.azure_configured.document_intelligence) ||
-    !isBoolean(value.azure_configured.openai)
-  ) {
-    return false;
-  }
-  // New readiness fields are optional so older backends still validate.
-  if (value.auth_required !== undefined && !isBoolean(value.auth_required)) return false;
-  if (
-    value.default_processing_profile !== undefined &&
-    !isString(value.default_processing_profile)
-  ) {
-    return false;
-  }
-  if (value.default_data_class !== undefined && !isString(value.default_data_class)) return false;
-  if (
-    value.openai_deployment_configured !== undefined &&
-    !isBoolean(value.openai_deployment_configured)
-  ) {
-    return false;
+  if (!isObject(value) || !isString(value.status)) return false;
+  // /health/ready is deliberately minimal (status plus optional subsystem probes);
+  // configuration detail lives behind auth on /health/dependencies.
+  if (value.database !== undefined && !isString(value.database)) return false;
+  if (value.storage !== undefined && !isString(value.storage)) return false;
+  if (value.worker !== undefined && !isString(value.worker)) return false;
+  if (value.limits !== undefined) {
+    if (
+      !isObject(value.limits) ||
+      !isFiniteNumber(value.limits.max_upload_size_mb) ||
+      !isFiniteNumber(value.limits.max_document_pages) ||
+      (value.limits.job_poll_timeout_minutes !== undefined &&
+        !isFiniteNumber(value.limits.job_poll_timeout_minutes))
+    ) {
+      return false;
+    }
   }
   return true;
+}
+
+export function isHealthDependencies(value: unknown): value is HealthDependencies {
+  return (
+    isObject(value) &&
+    isObject(value.document_intelligence) &&
+    isBoolean(value.document_intelligence.configured) &&
+    isObject(value.azure_openai) &&
+    isBoolean(value.azure_openai.configured) &&
+    (value.azure_openai.deployment === undefined ||
+      value.azure_openai.deployment === null ||
+      isString(value.azure_openai.deployment))
+  );
 }
 
 export function isSessionStatus(value: unknown): value is SessionStatus {

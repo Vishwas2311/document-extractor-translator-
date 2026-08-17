@@ -1,3 +1,6 @@
+import pytest
+
+from app.core.exceptions import AzureServiceError
 from app.schemas.page import (
     BoundingRegion,
     CanonicalDocument,
@@ -77,6 +80,18 @@ def test_merge_canonical_parts_uses_stable_page_ids() -> None:
     assert [block.block_id for block in merged.blocks] == ["p0001-b0001", "p0026-b0001"]
     assert merged.blocks[0].source_text == "اول"
     assert merged.blocks[1].source_text == "第二"
+
+
+def test_merge_canonical_parts_fails_loudly_on_overlapping_ranges() -> None:
+    # Ranges are disjoint by construction; a duplicate page across parts means
+    # the provider (or a resume bug) returned overlapping ranges. Merging would
+    # silently duplicate blocks/tables, so it must raise instead.
+    with pytest.raises(AzureServiceError, match="overlapping analysis ranges"):
+        merge_canonical_parts(
+            [_part("doc-1", 7, "اول"), _part("doc-1", 7, "第二")],
+            document_id="doc-1",
+            filename="doc.pdf",
+        )
 
 
 def test_assign_stable_ids_matches_merge() -> None:

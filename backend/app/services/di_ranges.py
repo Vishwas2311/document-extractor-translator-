@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+from app.core.exceptions import AzureServiceError
 from app.schemas.page import CanonicalDocument, PageMetadata, TableResult, TextBlock
 
 
@@ -89,7 +90,15 @@ def merge_canonical_parts(
     for part in parts:
         for page in part.pages:
             if page.page_number in seen_pages:
-                continue
+                # Ranges are disjoint by construction. A duplicate page across
+                # parts would silently duplicate its blocks/tables (they are
+                # extended wholesale below), so fail loudly instead of merging
+                # corrupted output.
+                raise AzureServiceError(
+                    "Document Intelligence returned overlapping analysis ranges: "
+                    f"page {page.page_number} appeared in more than one range.",
+                    retryable=False,
+                )
             seen_pages.add(page.page_number)
             pages.append(page)
         blocks.extend(part.blocks)

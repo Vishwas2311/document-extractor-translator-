@@ -72,6 +72,58 @@ def test_rejects_missing_or_extra_ids() -> None:
         TranslationValidator().validate(inputs, response)
 
 
+def test_id_mismatch_error_reports_which_ids_were_missing() -> None:
+    # Regression: a mismatch used to raise with no diagnostic payload at all, so a
+    # real occurrence could never be root-caused after the fact - only "they didn't
+    # match" was known, not which IDs.
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b2", source_language="zh-Hans", source_text="你好"),
+        TranslationInput(block_id="b3", source_language="ja", source_text="こんにちは"),
+    ]
+    response = TranslationBatchResponse(
+        translations=[
+            TranslationItem(block_id="b1", translated_text="Welcome"),
+            TranslationItem(block_id="b3", translated_text="Hello"),
+        ]
+    )
+
+    with pytest.raises(TranslationValidationError) as excinfo:
+        TranslationValidator().validate(inputs, response)
+
+    assert excinfo.value.details == {
+        "missing_ids": ["b2"],
+        "extra_ids": [],
+        "duplicate_ids": [],
+    }
+
+
+def test_id_mismatch_error_reports_extra_and_duplicate_ids_separately() -> None:
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b2", source_language="zh-Hans", source_text="你好"),
+    ]
+    response = TranslationBatchResponse(
+        translations=[
+            TranslationItem(block_id="b1", translated_text="Welcome"),
+            TranslationItem(block_id="b1", translated_text="Welcome again"),
+            TranslationItem(block_id="b3", translated_text="Unexpected"),
+        ]
+    )
+
+    with pytest.raises(TranslationValidationError) as excinfo:
+        TranslationValidator().validate(inputs, response)
+
+    # Counter-based diffing reports b1's extra copy as both "extra" (its count
+    # exceeds what was expected) and "duplicate" (it appears more than once) -
+    # these aren't mutually exclusive categories, by design.
+    assert excinfo.value.details == {
+        "missing_ids": ["b2"],
+        "extra_ids": ["b1", "b3"],
+        "duplicate_ids": ["b1"],
+    }
+
+
 def test_rejects_duplicate_ids_replacing_a_missing_one() -> None:
     # A plain set(actual) != set(expected) comparison would miss this: {"b1"} == {"b1"}
     # even though b2's translation is silently missing and b1 is duplicated instead.
@@ -102,23 +154,31 @@ def test_rejects_changed_protected_tokens() -> None:
     assert "b1" in invalid
 
 
-def test_protected_re_matches_full_pseudonym_token() -> None:
+async def _pseudonymize_single(
+    gateway: SecurityGateway, text: str
+) -> tuple[str, str, dict[str, str]]:
+    prepared = await gateway.prepare_translation_inputs(
+        ProcessingProfile.GENAI_PSEUDONYMIZED,
+        [TranslationInput(block_id="b1", source_language="en", source_text=text)],
+    )
+    pseudonymized = prepared.inputs[0].source_text
+    token = next(iter(prepared.token_map))
+    return pseudonymized, token, prepared.token_map
+
+
+async def test_protected_re_matches_full_pseudonym_token() -> None:
     # Every character from the kind prefix through the hex digest is a \w character,
     # so the pre-existing [A-Z]{2,}[A-Z0-9_-]* alternative has no internal \b boundary
     # to anchor on and matches none of a real token - not even its "ID_" prefix.
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    gateway._pseudonymize("Case reference 20261225", token_map)
-    token = next(iter(token_map))
+    _, token, _ = await _pseudonymize_single(gateway, "Case reference 20261225")
     assert PSEUDONYM_TOKEN_RE.fullmatch(token)
     assert PROTECTED_RE.findall(token) == [token]
 
 
-def test_rejects_truncated_pseudonym_token() -> None:
+async def test_rejects_truncated_pseudonym_token() -> None:
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    text, _ = gateway._pseudonymize("Reference number 20261225", token_map)
-    token = next(iter(token_map))
+    text, token, _ = await _pseudonymize_single(gateway, "Reference number 20261225")
     inputs = [TranslationInput(block_id="b1", source_language="en", source_text=text)]
     response = TranslationBatchResponse(
         translations=[
@@ -130,11 +190,9 @@ def test_rejects_truncated_pseudonym_token() -> None:
     assert "b1" in invalid
 
 
-def test_rejects_pseudonym_token_with_altered_digest() -> None:
+async def test_rejects_pseudonym_token_with_altered_digest() -> None:
     gateway = _gateway()
-    token_map: dict[str, str] = {}
-    text, _ = gateway._pseudonymize("Reference number 20261225", token_map)
-    token = next(iter(token_map))
+    text, token, _ = await _pseudonymize_single(gateway, "Reference number 20261225")
     altered = token[:-2] + ("0" if token[-2] != "0" else "1") + token[-1]
     inputs = [TranslationInput(block_id="b1", source_language="en", source_text=text)]
     response = TranslationBatchResponse(
@@ -145,7 +203,7 @@ def test_rejects_pseudonym_token_with_altered_digest() -> None:
     assert "b1" in invalid
 
 
-def test_pseudonymize_translate_validate_restore_round_trip() -> None:
+async def test_pseudonymize_translate_validate_restore_round_trip() -> None:
     gateway = _gateway()
     # The digit run must be set off by punctuation from surrounding Han text - a bare
     # 6+-digit run directly abutting Han characters on both sides has no \b boundary
@@ -155,7 +213,9 @@ def test_pseudonymize_translate_validate_restore_round_trip() -> None:
             block_id="b1", source_language="zh-Hans", source_text="账户余额：20261225"
         )
     ]
-    prepared = gateway.prepare_translation_inputs(ProcessingProfile.GENAI_PSEUDONYMIZED, inputs)
+    prepared = await gateway.prepare_translation_inputs(
+        ProcessingProfile.GENAI_PSEUDONYMIZED, inputs
+    )
     pseudonymized_text = prepared.inputs[0].source_text
     token = next(iter(prepared.token_map))
     assert token in pseudonymized_text

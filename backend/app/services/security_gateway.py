@@ -15,16 +15,46 @@ from app.core.config import Settings
 from app.core.enums import DataClass, ProcessingProfile
 from app.core.exceptions import PolicyBlockedError
 from app.schemas.translation import TranslationInput
+from app.services.pii import PiiDetector, PiiSpan, build_pii_detector, dedupe_overlaps
 
-EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
-URL_RE = re.compile(r"https?://[^\s<>\"']+|www\.[^\s<>\"']+", re.IGNORECASE)
-# Long digit runs and common ID-like tokens (case numbers, MRNs, etc.).
-ID_RE = re.compile(r"\b(?:ID|MRN|SSN|NINO|CASE)[-:#\s]?\d{4,}\b|\b\d{6,}\b", re.IGNORECASE)
-# Matches a pseudonym token as generated in `_pseudonymize` below (e.g. "⟦ID_a3f9c2d1e4b5⟧").
+# Matches a pseudonym token as generated in `_tokenize` below (e.g. "⟦ID_a3f9c2d1e4b5⟧").
 # Single source of truth for the token shape, reused by validation.py's round-trip
 # integrity check so the two can never silently drift apart.
 PSEUDONYM_TOKEN_RE = re.compile(r"⟦[A-Z]+_[0-9a-f]{12}⟧")
+
+# Explicit allow-matrix for generative profiles: any (data_class, profile)
+# combination not listed here fails closed. MANAGED_NO_LLM and BLOCKED are not
+# generative routes - they are rejected below with their own specific messages.
+# GENAI_RAW_EXCEPTION additionally requires the kill switch for EVERY data class,
+# and GENAI_SYNTHETIC_POC (raw text) is allowed for synthetic data only -
+# deidentified content must use the pseudonymized route.
+GENAI_PROFILE_ALLOW_MATRIX: dict[DataClass, frozenset[ProcessingProfile]] = {
+    DataClass.SYNTHETIC: frozenset(
+        {
+            ProcessingProfile.GENAI_PSEUDONYMIZED,
+            ProcessingProfile.GENAI_SYNTHETIC_POC,
+            ProcessingProfile.GENAI_RAW_EXCEPTION,
+        }
+    ),
+    DataClass.DEIDENTIFIED: frozenset(
+        {
+            ProcessingProfile.GENAI_PSEUDONYMIZED,
+            ProcessingProfile.GENAI_RAW_EXCEPTION,
+        }
+    ),
+    DataClass.CONFIDENTIAL: frozenset(
+        {
+            ProcessingProfile.GENAI_PSEUDONYMIZED,
+            ProcessingProfile.GENAI_RAW_EXCEPTION,
+        }
+    ),
+    DataClass.RESTRICTED: frozenset(
+        {
+            ProcessingProfile.GENAI_PSEUDONYMIZED,
+            ProcessingProfile.GENAI_RAW_EXCEPTION,
+        }
+    ),
+}
 
 
 @dataclass
@@ -35,9 +65,19 @@ class PseudonymizationResult:
 
 
 class SecurityGateway:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, detector: PiiDetector | None = None) -> None:
         self.settings = settings
-        secret = settings.pseudonymization_secret or settings.app_name
+        self._detector = detector if detector is not None else build_pii_detector(settings)
+        secret = settings.pseudonymization_secret
+        if not secret:
+            # No configured secret: never fall back to a public, install-identical
+            # value (the app name) — that makes pseudonym tokens predictable and
+            # identical across every deployment. Use a per-process random secret so
+            # local demos still run, while production is separately forced (config
+            # validation) to require a strong, externally managed secret.
+            import secrets
+
+            secret = secrets.token_urlsafe(48)
         self._secret = secret.encode("utf-8")
 
     def select_profile(
@@ -68,30 +108,25 @@ class SecurityGateway:
         else:
             profile = default
 
-        if classified in {DataClass.CONFIDENTIAL, DataClass.RESTRICTED}:
-            if profile == ProcessingProfile.GENAI_SYNTHETIC_POC:
+        if profile not in {ProcessingProfile.MANAGED_NO_LLM, ProcessingProfile.BLOCKED}:
+            allowed = GENAI_PROFILE_ALLOW_MATRIX.get(classified)
+            if allowed is None or profile not in allowed:
                 raise PolicyBlockedError(
-                    "Synthetic-only LLM profile cannot process confidential or restricted data.",
+                    "No approved processing profile for this data class. Failing closed.",
                     details={"data_class": classified.value, "profile": profile.value},
                 )
-            if profile == ProcessingProfile.GENAI_RAW_EXCEPTION:
-                if not self.settings.genai_raw_exception_enabled:
-                    raise PolicyBlockedError(
-                        "Raw generative LLM exception is not enabled.",
-                        details={"data_class": classified.value},
-                    )
-            elif profile not in {
-                ProcessingProfile.GENAI_PSEUDONYMIZED,
-                ProcessingProfile.MANAGED_NO_LLM,
-                ProcessingProfile.BLOCKED,
-            }:
+            if (
+                profile == ProcessingProfile.GENAI_RAW_EXCEPTION
+                and not self.settings.genai_raw_exception_enabled
+            ):
                 raise PolicyBlockedError(
-                    "No approved processing profile for this data class.",
-                    details={"data_class": classified.value, "profile": profile.value},
+                    "Raw generative LLM exception is not enabled.",
+                    details={"data_class": classified.value},
                 )
-
-        if classified == DataClass.SYNTHETIC and profile == ProcessingProfile.GENAI_SYNTHETIC_POC:
-            if not self.settings.allow_synthetic_raw_llm:
+            if (
+                profile == ProcessingProfile.GENAI_SYNTHETIC_POC
+                and not self.settings.allow_synthetic_raw_llm
+            ):
                 raise PolicyBlockedError(
                     "Synthetic raw LLM path is disabled. Use GENAI_PSEUDONYMIZED.",
                     details={"profile": profile.value},
@@ -109,7 +144,7 @@ class SecurityGateway:
 
         return profile
 
-    def prepare_translation_inputs(
+    async def prepare_translation_inputs(
         self,
         profile: ProcessingProfile,
         inputs: list[TranslationInput],
@@ -127,19 +162,34 @@ class SecurityGateway:
             )
 
         token_map: dict[str, str] = {}
-        prepared: list[TranslationInput] = []
+        prepared: list[TranslationInput | None] = [None] * len(inputs)
         detections = 0
-        for item in inputs:
-            text, found = self._pseudonymize(item.source_text, token_map)
-            detections += found
-            prepared.append(
-                TranslationInput(
+
+        # Group by source language so a language-aware detector gets the right hint,
+        # and only make one detection call per language group.
+        groups: dict[str | None, list[int]] = {}
+        for index, item in enumerate(inputs):
+            groups.setdefault(item.source_language, []).append(index)
+
+        for language, indices in groups.items():
+            texts = [inputs[i].source_text for i in indices]
+            spans_by_text = await self._detector.detect_batch(texts, language=language)
+            for local_index, source_index in enumerate(indices):
+                item = inputs[source_index]
+                new_text, found = self._tokenize(
+                    item.source_text, spans_by_text[local_index], token_map
+                )
+                detections += found
+                prepared[source_index] = TranslationInput(
                     block_id=item.block_id,
                     source_language=item.source_language,
-                    source_text=text,
+                    source_text=new_text,
                 )
-            )
-        return PseudonymizationResult(inputs=prepared, token_map=token_map, detections=detections)
+
+        finalized = [item for item in prepared if item is not None]
+        return PseudonymizationResult(
+            inputs=finalized, token_map=token_map, detections=detections
+        )
 
     def restore_text(self, text: str, token_map: dict[str, str]) -> str:
         restored = text
@@ -148,26 +198,29 @@ class SecurityGateway:
             restored = restored.replace(token, token_map[token])
         return restored
 
-    def _pseudonymize(self, text: str, token_map: dict[str, str]) -> tuple[str, int]:
+    def _tokenize(
+        self, text: str, spans: list[PiiSpan], token_map: dict[str, str]
+    ) -> tuple[str, int]:
+        safe_spans = dedupe_overlaps(spans)
+        if not safe_spans:
+            return text, 0
         detections = 0
-
-        def replace(match: re.Match[str], kind: str) -> str:
-            nonlocal detections
-            original = match.group(0)
+        result = text
+        # Replace right-to-left so earlier spans' indices stay valid.
+        for span in sorted(safe_spans, key=lambda s: s.start, reverse=True):
+            original = text[span.start : span.end]
+            if not original:
+                continue
+            kind = re.sub(r"[^A-Za-z]", "", span.category).upper() or "PII"
             digest = hmac.new(
                 self._secret,
                 f"{kind}:{original}".encode(),
                 hashlib.sha256,
             ).hexdigest()[:12]
-            token = f"⟦{kind.upper()}_{digest}⟧"
+            token = f"⟦{kind}_{digest}⟧"
             token_map[token] = original
+            result = result[: span.start] + token + result[span.end :]
             detections += 1
-            return token
-
-        result = EMAIL_RE.sub(lambda m: replace(m, "email"), text)
-        result = URL_RE.sub(lambda m: replace(m, "url"), result)
-        result = PHONE_RE.sub(lambda m: replace(m, "phone"), result)
-        result = ID_RE.sub(lambda m: replace(m, "id"), result)
         return result, detections
 
     @staticmethod

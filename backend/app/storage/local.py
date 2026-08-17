@@ -54,7 +54,9 @@ class LocalArtifactStorage:
         target = self._artifact_path(document_id, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        content = await asyncio.to_thread(
+            json.dumps, payload, ensure_ascii=False, indent=2
+        )
         try:
             async with aiofiles.open(temporary, "w", encoding="utf-8", newline="\n") as handle:
                 await handle.write(content)
@@ -70,7 +72,8 @@ class LocalArtifactStorage:
         if not target.exists():
             raise DocumentNotFoundError("Requested artifact was not found.")
         async with aiofiles.open(target, encoding="utf-8") as handle:
-            return cast(dict[str, Any], json.loads(await handle.read()))
+            raw = await handle.read()
+        return cast(dict[str, Any], await asyncio.to_thread(json.loads, raw))
 
     async def write_text(
         self,

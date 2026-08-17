@@ -6,7 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core.enums import ProcessingProfile, TranslationStatus
-from app.core.exceptions import PolicyBlockedError
+from app.core.exceptions import PolicyBlockedError, TranslationValidationError
 from app.prompts.translation import TRANSLATION_PROMPT_VERSION
 from app.schemas.page import CanonicalDocument, PageMetadata, TableCell, TableResult, TextBlock
 from app.schemas.translation import (
@@ -642,12 +642,17 @@ async def test_batch_translation_missing_block_id_is_isolated_per_block() -> Non
     assert any("did not include this block" in warning for warning in second.warnings)
 
 
-async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -> None:
+async def test_default_validator_isolates_a_persistently_missing_block_via_split_recovery() -> None:
     """Documents current, real behavior with the actual (non-stubbed)
-    `TranslationValidator`: it already rejects an ID-set mismatch before the
-    block-mapping code in `run_batch` ever runs, so a missing block_id fails the whole
-    *batch* it was requested in (not the whole document - other batches are
-    unaffected), via the pre-existing `TranslationValidationError` handling."""
+    `TranslationValidator` and the default retry budget
+    (translation_id_mismatch_retries=1, the ProcessingService default): a
+    response missing one block_id is rejected before the block-mapping code
+    in `run_batch` ever runs, via the pre-existing `TranslationValidationError`
+    handling - but split-recovery (`_translate_with_recovery`) means only the
+    persistently-bad block ends up failed. b0001, which the stub translator
+    always translates correctly, recovers once the batch splits down to just
+    b0002 - it is no longer taken down alongside a block it has nothing to do
+    with."""
     storage = MemoryStorage()
     service = _service(
         storage=storage,
@@ -671,9 +676,243 @@ async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -
 
     assert review_required
     first, second = document.blocks
-    assert first.translation_status == TranslationStatus.FAILED
+    assert first.translation_status == TranslationStatus.TRANSLATED
     assert second.translation_status == TranslationStatus.FAILED
-    assert any("Translation failed" in warning for warning in first.warnings)
+    assert any("Translation failed" in warning for warning in second.warnings)
+
+
+class FailsIdMismatchOnceTranslator:
+    """Drops one requested block_id on the first call only; returns a complete,
+    correct response on every subsequent call - simulates the occasional-LLM-
+    sampling-noise case a bounded retry is meant to self-heal, as opposed to
+    MissingBlockIdTranslator's always-fails behavior above."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        self.calls += 1
+        blocks = request.blocks
+        if self.calls == 1:
+            blocks = [item for item in blocks if item.block_id != "b0002"]
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text="EN: " + item.source_text)
+                for item in blocks
+            ]
+        )
+
+
+async def test_id_mismatch_retry_recovers_the_batch() -> None:
+    """The bounded retry added for TranslationValidationError must recover a batch
+    whose first response had a transient ID mismatch, and must record a diagnostic
+    artifact for the failed attempt so a real occurrence is forensicable afterward -
+    unlike before, when the raw offending response was simply discarded."""
+    storage = MemoryStorage()
+    translator = FailsIdMismatchOnceTranslator()
+    service = _service(
+        storage=storage, translator=translator, translation_id_mismatch_retries=1
+    )
+    inputs = [
+        TranslationInput(block_id="b0001", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b0002", source_language="zh-Hans", source_text="青年支持"),
+    ]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+
+    response, invalid = await service._resolve_batch_translation(
+        "doc-6", artifact, "hash-1", request, inputs
+    )
+
+    assert invalid == {}
+    assert {item.block_id for item in response.translations} == {"b0001", "b0002"}
+    assert translator.calls == 2
+    # The failed first attempt's raw response was persisted as a diagnostic
+    # artifact instead of silently discarded.
+    assert "translations/batch-0001.mismatch-1.json" in storage.payloads
+    mismatch_artifact = storage.payloads["translations/batch-0001.mismatch-1.json"]
+    assert mismatch_artifact["missing_ids"] == ["b0002"]
+    # The final, successful attempt's response is what's stored under the real
+    # batch artifact path - not the failed one.
+    assert artifact in storage.payloads
+
+
+async def test_id_mismatch_retries_exhausted_still_fails_the_batch_terminally() -> None:
+    """With retries disabled (or exhausted), the batch must still fail exactly as it
+    did before this fix - the retry is a self-healing improvement, not a change to
+    the terminal fallback contract."""
+    storage = MemoryStorage()
+    translator = FailsIdMismatchOnceTranslator()
+    service = _service(
+        storage=storage, translator=translator, translation_id_mismatch_retries=0
+    )
+    inputs = [
+        TranslationInput(block_id="b0001", source_language="ar", source_text="مرحبا"),
+        TranslationInput(block_id="b0002", source_language="zh-Hans", source_text="青年支持"),
+    ]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+
+    with pytest.raises(TranslationValidationError):
+        await service._resolve_batch_translation(
+            "doc-7", artifact, "hash-1", request, inputs
+        )
+
+    assert translator.calls == 1
+    assert "translations/batch-0001.mismatch-1.json" in storage.payloads
+    # No successful response was ever produced, so the real batch artifact path
+    # must not exist.
+    assert artifact not in storage.payloads
+
+
+class DropsOneBlockInASingleBatchTranslator:
+    """Faithfully translates every block except one specific block_id, which it
+    silently drops from its response whenever that block appears in a request -
+    simulating an ID mismatch confined to whichever single batch that block
+    happens to land in."""
+
+    def __init__(self, block_id_to_drop: str) -> None:
+        self.block_id_to_drop = block_id_to_drop
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id=item.block_id, translated_text="EN: " + item.source_text)
+                for item in request.blocks
+                if item.block_id != self.block_id_to_drop
+            ]
+        )
+
+
+async def test_id_mismatch_blast_radius_stays_batch_scoped_at_realistic_scale() -> None:
+    """A 15-block document split into 3 batches of 5 (max_batch_blocks=5), where
+    only the middle batch's response drops one block_id, must fail only that
+    batch's blocks - the other two batches' blocks must translate normally. Proves
+    the "blast radius stays batch-scoped, not document-scoped" claim at a scale
+    closer to a real multi-batch document than the existing 1-batch/2-block tests."""
+    storage = MemoryStorage()
+    # Block 7 (1-indexed) lands in the second batch (blocks 6-10) given
+    # max_batch_blocks=5.
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0007")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=5,
+        translation_id_mismatch_retries=0,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 16)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-8",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    by_id = {block.block_id: block for block in document.blocks}
+    first_batch_ids = [f"b{index:04d}" for index in range(1, 6)]
+    second_batch_ids = [f"b{index:04d}" for index in range(6, 11)]
+    third_batch_ids = [f"b{index:04d}" for index in range(11, 16)]
+    for block_id in first_batch_ids + third_batch_ids:
+        assert by_id[block_id].translation_status == TranslationStatus.TRANSLATED, block_id
+    for block_id in second_batch_ids:
+        assert by_id[block_id].translation_status == TranslationStatus.FAILED, block_id
+    assert "translations/batch-0002.mismatch-1.json" in storage.payloads
+    assert "translations/batch-0001.mismatch-1.json" not in storage.payloads
+    assert "translations/batch-0003.mismatch-1.json" not in storage.payloads
+
+
+async def test_split_recovery_isolates_a_single_persistently_bad_block_within_a_batch() -> None:
+    """With retries enabled (the default), a single batch where one specific
+    block_id is always dropped must recover via recursive split - only that
+    one block ends up FAILED, not the other 7 sharing its batch. This is the
+    behavior improvement over the flat-retry-only approach: previously any
+    mismatch failed the whole batch (up to translation_max_blocks blocks) even
+    though only one block was ever actually the problem."""
+    storage = MemoryStorage()
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0004")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=25,
+        translation_id_mismatch_retries=1,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 9)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-9",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    by_id = {block.block_id: block for block in document.blocks}
+    for block_id in ("b0001", "b0002", "b0003", "b0005", "b0006", "b0007", "b0008"):
+        assert by_id[block_id].translation_status == TranslationStatus.TRANSLATED, block_id
+    assert by_id["b0004"].translation_status == TranslationStatus.FAILED
+    assert any("Translation failed" in warning for warning in by_id["b0004"].warnings)
+
+
+async def test_split_recovery_artifact_names_stay_flat_and_bounded() -> None:
+    """Guards against the exact bug class a prior implementation of this same
+    recovery strategy hit: split artifact names built by appending onto the
+    *previous* split's name grow without bound the deeper a range keeps
+    failing, eventually breaking file writes on Windows. Every split artifact
+    name here must be exactly the original batch root plus one absolute
+    position-range suffix - never nested/cumulative - regardless of how many
+    times a given range keeps failing and re-splitting."""
+    storage = MemoryStorage()
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0004")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=25,
+        translation_id_mismatch_retries=1,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 9)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-10",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    await service._translate(document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC)
+
+    split_artifact_names = [
+        name for name in storage.payloads if ".split-" in name
+    ]
+    assert split_artifact_names, "expected at least one split artifact to have been written"
+    for name in split_artifact_names:
+        # Exactly one root + one range suffix (+ an optional .mismatch-N
+        # diagnostic suffix) - never two ".split-" occurrences, which would
+        # mean a split name was built from another split name instead of the
+        # original batch root.
+        assert name.count(".split-") == 1, name
+        assert name.startswith("translations/batch-0001.split-"), name
+        # A generous, fixed upper bound - this must stay constant regardless
+        # of how many times a range keeps re-splitting, not grow with depth.
+        assert len(name) < 80, (name, len(name))
 
 
 class ProtectedTokenDriftTranslator:
@@ -1550,6 +1789,213 @@ async def test_translation_dedupes_identical_source_strings() -> None:
         "EN:الإجمالي",
         "EN:الإجمالي",
     ]
+
+
+async def test_dedupe_follower_keeps_its_own_review_flags_and_warnings() -> None:
+    # Fan-out from a dedupe representative must MERGE into followers, not
+    # overwrite them: a follower carrying its own low OCR-confidence flag must
+    # stay review_required with its OCR warning after receiving the shared
+    # translation.
+    storage = MemoryStorage()
+    service = _service(
+        storage=storage,
+        translator=FakeTranslator(),
+        translation_dedupe_identical=True,
+    )
+    document = CanonicalDocument(
+        document_id="doc-dedupe-merge",
+        filename="dedupe-merge.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=[
+            TextBlock(
+                block_id="b-rep",
+                reading_order=1,
+                source_text="الإجمالي",
+                ocr_confidence=0.99,
+            ),
+            TextBlock(
+                block_id="b-follower",
+                reading_order=2,
+                source_text="الإجمالي",
+                ocr_confidence=0.5,
+            ),
+        ],
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+    representative, follower = document.blocks
+
+    assert review_required
+    assert representative.translation_status == TranslationStatus.TRANSLATED
+    assert not representative.review_required
+    assert follower.translation_status == TranslationStatus.TRANSLATED
+    assert follower.translated_text == representative.translated_text
+    # The follower's own OCR flag and warning survive the fan-out.
+    assert follower.review_required
+    assert any("OCR confidence" in warning for warning in follower.warnings)
+
+
+def test_mark_untranslated_outside_selection_resolves_pending_blocks_and_cells() -> None:
+    from app.schemas.page import BoundingRegion
+
+    document = CanonicalDocument(
+        document_id="doc-excluded",
+        filename="excluded.pdf",
+        status="translating",
+        pages=[
+            PageMetadata(page_number=1, page_count=2, width=8.5, height=11, unit="inch"),
+            PageMetadata(page_number=2, page_count=2, width=8.5, height=11, unit="inch"),
+        ],
+        blocks=[
+            TextBlock(
+                block_id="b-selected",
+                reading_order=1,
+                source_text="مرحبا",
+                translation_status=TranslationStatus.TRANSLATED,
+                bounding_regions=[BoundingRegion(page_number=1)],
+            ),
+            TextBlock(
+                block_id="b-excluded",
+                reading_order=2,
+                source_text="青年",
+                bounding_regions=[BoundingRegion(page_number=2)],
+            ),
+        ],
+        tables=[
+            TableResult(
+                table_id="t-excluded",
+                row_count=1,
+                column_count=1,
+                cells=[
+                    TableCell(
+                        cell_id="t-excluded-c1",
+                        row_index=0,
+                        column_index=0,
+                        content="拾万元",
+                        bounding_regions=[BoundingRegion(page_number=2)],
+                    )
+                ],
+            )
+        ],
+    )
+
+    ProcessingService._mark_untranslated_outside_selection(document, {1})
+
+    selected_block, excluded_block = document.blocks
+    excluded_cell = document.tables[0].cells[0]
+    assert selected_block.translation_status == TranslationStatus.TRANSLATED
+    assert selected_block.warnings == []
+    assert excluded_block.translation_status == TranslationStatus.NOT_REQUIRED
+    assert excluded_block.warnings == [ProcessingService.EXCLUDED_PAGE_WARNING]
+    assert excluded_cell.translation_status == TranslationStatus.NOT_REQUIRED
+    assert excluded_cell.warnings == [ProcessingService.EXCLUDED_PAGE_WARNING]
+
+
+class DenseClassifyAnalyzer:
+    """Selects pages 1-2 as financial and rejects page 3 with high confidence,
+    producing a 2/3 selection density that trips the adaptive dense-full-extract
+    path; analyze() then returns the full three-page layout."""
+
+    def __init__(self) -> None:
+        self.analyze_calls: list[str | None] = []
+
+    async def classify(
+        self,
+        source_path: Path,
+        *,
+        classifier_id: str,
+        split_mode: str,
+    ) -> dict[str, object]:
+        return {
+            "documents": [
+                {
+                    "docType": "financial_table",
+                    "confidence": 0.95,
+                    "boundingRegions": [{"pageNumber": 1}, {"pageNumber": 2}],
+                },
+                {
+                    "docType": "non_financial",
+                    "confidence": 0.99,
+                    "boundingRegions": [{"pageNumber": 3}],
+                },
+            ]
+        }
+
+    async def analyze(
+        self, source_path: Path, *, pages: str | None = None
+    ) -> dict[str, Any]:
+        self.analyze_calls.append(pages)
+        return _raw_pages([1, 2, 3])
+
+
+class DenseRepository(MemoryRepository):
+    async def get(self, document_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=document_id,
+            original_filename="dense.pdf",
+            stored_extension="pdf",
+            data_class="synthetic",
+            processing_profile="GENAI_SYNTHETIC_POC",
+            status=self.status,
+            page_count=3,
+            pages_ready=None,
+            financial_extraction_mode="selective",
+        )
+
+
+async def test_dense_full_extract_final_writes_every_page_and_resolves_excluded_blocks() -> None:
+    from app.integrations.document_intelligence.mapper import DocumentIntelligenceMapper
+    from app.services.export import ExportService
+    from app.services.financial import (
+        FinancialCandidateSelector,
+        FinancialExtractionService,
+    )
+
+    repository = DenseRepository()
+    storage = MemoryStorage()
+    analyzer = DenseClassifyAnalyzer()
+    selector = FinancialCandidateSelector(
+        financial_labels={"financial_table"},
+        include_confidence=0.65,
+        exclude_confidence=0.9,
+        adjacent_pages=0,
+    )
+    service = _service(
+        repository=repository,
+        storage=storage,
+        analyzer=analyzer,
+        mapper=DocumentIntelligenceMapper(),
+        translator=FakeTranslator(),
+        exporter=ExportService(),
+        financial_selector=selector,
+        financial_extractor=FinancialExtractionService(),
+        financial_extraction_mode="selective",
+        financial_classifier_model_id="finance-classifier",
+        financial_classifier_version="7",
+    )
+    service._estimate_pdf_pages = _async_const(3)  # type: ignore[method-assign]
+
+    await service.process("doc-dense")
+
+    # Dense selection (2 of 3 pages) triggered one full-document extraction.
+    assert analyzer.analyze_calls == [None]
+    final_status = str(repository.document_updates[-1]["status"])
+    assert final_status in {"completed", "needs_review"}
+    # Every extracted page is final-written; none is left at "normalizing".
+    for page_number in (1, 2, 3):
+        page = storage.payloads[f"pages/page-{page_number:04d}.json"]
+        assert page["document_status"] == final_status
+    # The non-selected page's block resolved to not_required with the policy warning.
+    excluded_page = storage.payloads["pages/page-0003.json"]
+    excluded_block = excluded_page["blocks"][0]
+    assert excluded_block["translation_status"] == "not_required"
+    assert ProcessingService.EXCLUDED_PAGE_WARNING in excluded_block["warnings"]
+    # Selected pages actually translated.
+    selected_block = storage.payloads["pages/page-0001.json"]["blocks"][0]
+    assert selected_block["translation_status"] == "translated"
 
 
 async def test_parallel_di_ranges_honor_concurrency_cap() -> None:

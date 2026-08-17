@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # Backend Python dependencies. Note: Dependabot only updates the unpinned
+  # requirements.txt here, not requirements.lock.txt (that file is
+  # hash-pinned via `pip ... --generate-hashes` and needs to be regenerated
+  # deliberately on a matching platform - see CI's install step). A PR from
+  # this entry is safe to merge on its own, but doesn't change what CI
+  # actually installs until the lock file is regenerated to match.
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

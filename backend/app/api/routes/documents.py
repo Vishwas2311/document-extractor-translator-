@@ -7,8 +7,12 @@ from typing import Annotated, Literal, cast
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.core.auth import AuthPrincipal, require_principal
-from app.core.authorization import require_document_access
+from app.core.auth import (
+    AuthPrincipal,
+    require_principal,
+    validate_reviewer_assignment,
+)
+from app.core.authorization import ROLE_OPERATOR, ROLE_ORG_ADMIN, require_document_access
 from app.core.enums import (
     TERMINAL_DOCUMENT_STATUSES,
     DocumentStatus,
@@ -16,6 +20,11 @@ from app.core.enums import (
     RetryMode,
 )
 from app.core.exceptions import ConflictError, DocumentNotFoundError, InvalidDocumentError
+from app.core.idempotency import (
+    idempotency_scope,
+    normalize_key,
+    request_fingerprint,
+)
 from app.dependencies.services import ServiceContainer
 from app.models.document import Document
 from app.models.financial_review import FinancialReview
@@ -44,7 +53,15 @@ from app.schemas.translation_review import (
     TranslationReviewRecord,
 )
 from app.services.audit import AuditService
-from app.services.financial import financial_result_sha256
+from app.services.financial import (
+    REVIEWED_FINANCIAL_CSV_PATH,
+    REVIEWED_FINANCIAL_JSON_PATH,
+    REVIEWED_FINANCIAL_XLSX_PATH,
+    apply_financial_corrections,
+    financial_result_csv,
+    financial_result_sha256,
+    financial_result_xlsx,
+)
 from app.services.translation_review import (
     REVIEWED_BILINGUAL_PATH,
     TRANSLATION_REVIEW_SCHEMA_VERSION,
@@ -64,6 +81,30 @@ def container(request: Request) -> ServiceContainer:
 
 def _principal(request: Request) -> AuthPrincipal:
     return cast(AuthPrincipal, request.state.principal)
+
+
+async def _record_audit(
+    request: Request,
+    *,
+    action: str,
+    resource_id: str,
+    detail: str | None = None,
+) -> None:
+    services = container(request)
+    # Lightweight route-unit fakes do not implement the repository's audit port.
+    # The concrete application repository always does.
+    if not hasattr(services.repository, "create_audit_event"):
+        return
+    principal = _principal(request)
+    await AuditService(services.repository).record(
+        organization_id=principal.organization_id,
+        actor_subject=principal.subject,
+        action=action,
+        resource_type="document",
+        resource_id=resource_id,
+        correlation_id=getattr(request.state, "request_id", None),
+        detail=detail,
+    )
 
 
 def _enforce_document_access(
@@ -109,13 +150,68 @@ async def upload_document(
 ) -> DocumentCreateResponse:
     services = container(request)
     principal = _principal(request)
-    document = await services.document_service.create_upload(
-        file,
-        data_class=data_class,
-        processing_profile=processing_profile,
-        owner_subject=principal.subject,
-        organization_id=principal.organization_id,
+    if (data_class is not None or processing_profile is not None) and not principal.has_role(
+        ROLE_ORG_ADMIN, ROLE_OPERATOR
+    ):
+        raise InvalidDocumentError(
+            "Only an authorized administrator may request a data-class or "
+            "processing-profile override."
+        )
+    if services.settings.app_env.casefold() == "production" and (
+        data_class is not None or processing_profile is not None
+    ):
+        raise InvalidDocumentError(
+            "Production data class and processing profile are selected by server policy."
+        )
+    idem_key = normalize_key(request.headers.get("idempotency-key"))
+    supports_idempotency = idem_key is not None and hasattr(
+        services.repository, "reserve_idempotency"
     )
+    scope = ""
+    fingerprint = ""
+    if supports_idempotency:
+        assert idem_key is not None
+        scope = idempotency_scope(principal, "document.upload", idem_key)
+        # Fingerprint must cover the actual file bytes, not just its metadata:
+        # a replay of the same key with a genuinely different file (e.g. a
+        # corrected version with the same filename/content-type) must be
+        # rejected as "different request", not silently return the first
+        # upload's cached response. Read-then-seek(0) so create_upload's own
+        # streaming read below still sees the file from the start.
+        content_digest = hashlib.sha256()
+        while chunk := await file.read(1024 * 1024):
+            content_digest.update(chunk)
+        await file.seek(0)
+        fingerprint = request_fingerprint(
+            file.filename,
+            file.content_type,
+            data_class,
+            processing_profile,
+            content_digest.hexdigest(),
+        )
+        owns, record = await services.repository.reserve_idempotency(scope, fingerprint)
+        if not owns:
+            if record.request_hash != fingerprint:
+                raise ConflictError(
+                    "This Idempotency-Key was already used with a different request."
+                )
+            if record.response_status == 0 or not record.response_body:
+                raise ConflictError(
+                    "A request with this Idempotency-Key is still being processed."
+                )
+            return DocumentCreateResponse.model_validate_json(record.response_body)
+    try:
+        document = await services.document_service.create_upload(
+            file,
+            data_class=data_class,
+            processing_profile=processing_profile,
+            owner_subject=principal.subject,
+            organization_id=principal.organization_id,
+        )
+    except Exception:
+        if supports_idempotency:
+            await services.repository.release_idempotency(scope)
+        raise
     await AuditService(services.repository).record(
         organization_id=principal.organization_id,
         actor_subject=principal.subject,
@@ -124,13 +220,21 @@ async def upload_document(
         resource_id=document.id,
     )
     await services.runner.enqueue(document.id)
-    return DocumentCreateResponse(
+    response = DocumentCreateResponse(
         document_id=document.id,
         status=document.status,
         status_url=f"{services.settings.api_v1_prefix}/documents/{document.id}",
         processing_profile=document.processing_profile,
         data_class=document.data_class,
     )
+    if supports_idempotency:
+        await services.repository.complete_idempotency(
+            scope,
+            response_status=status.HTTP_202_ACCEPTED,
+            response_body=response.model_dump_json(),
+            resource_id=document.id,
+        )
+    return response
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -170,6 +274,13 @@ async def get_source(request: Request, document_id: str) -> FileResponse:
     document = await services.repository.get(document_id)
     _enforce_document_access(_principal(request), document)
     source = services.storage.source_path(document_id, document.stored_extension)
+    if not source.exists():
+        raise DocumentNotFoundError("Source document was not found.")
+    await _record_audit(
+        request,
+        action="document.source.view",
+        resource_id=document_id,
+    )
     return FileResponse(
         source,
         media_type=document.content_type,
@@ -402,6 +513,12 @@ async def create_financial_review(
     payload = await services.storage.read_json(document_id, "normalized/financial.json")
     result = FinancialResult.model_validate(payload)
     result_sha256 = financial_result_sha256(result)
+    expected_hash = request.headers.get("if-match")
+    app_env = getattr(getattr(services, "settings", None), "app_env", "development")
+    if app_env.casefold() == "production" and not expected_hash:
+        raise ConflictError("If-Match is required when saving a production review.")
+    if expected_hash and expected_hash.strip('"') != result_sha256:
+        raise ConflictError("The financial result changed before the review could be saved.")
     cells = {cell.cell_id: cell for table in result.tables for cell in table.cells}
     corrections_by_cell = {
         correction.cell_id: correction for correction in review.corrections
@@ -474,6 +591,26 @@ async def create_financial_review(
 
     principal = cast(AuthPrincipal, request.state.principal)
     now = datetime.now(UTC)
+    # Materialize the reviewed exports BEFORE the review record commits, and
+    # only for approvals. A failed or rejected review must leave no
+    # reviewed-financial artifacts behind. Each write is atomic (temp file +
+    # rename), so readers never observe a partial file. Writing first means a
+    # failed write here leaves the document's review status untouched instead
+    # of stuck "approved" with missing/broken exports - the repository call
+    # below is what actually commits the approval, and it re-validates the
+    # result hash itself, so a write that raced a stale artifact still fails
+    # safely at that point.
+    if review.decision == "approved":
+        reviewed_result = apply_financial_corrections(result, review.corrections)
+        await services.storage.write_json(
+            document_id, REVIEWED_FINANCIAL_JSON_PATH, reviewed_result.model_dump(mode="json")
+        )
+        await services.storage.write_text(
+            document_id, REVIEWED_FINANCIAL_CSV_PATH, financial_result_csv(reviewed_result)
+        )
+        await services.storage.write_bytes(
+            document_id, REVIEWED_FINANCIAL_XLSX_PATH, financial_result_xlsx(reviewed_result)
+        )
     persisted = await services.repository.create_financial_review(
         FinancialReview(
             document_id=document_id,
@@ -491,6 +628,11 @@ async def create_financial_review(
             result_sha256=result_sha256,
             created_at=now,
         )
+    )
+    await _record_audit(
+        request,
+        action=f"financial.review.{review.decision}",
+        resource_id=document_id,
     )
     return FinancialReviewRecord.model_validate(persisted).model_copy(
         update={"active_result": True}
@@ -547,20 +689,38 @@ async def create_translation_review(
     bilingual = await services.storage.read_json(
         document_id, "exports/bilingual-document.json"
     )
-    computed_sha256 = bilingual_result_sha256(bilingual)
-    if document.translation_result_sha256:
-        result_sha256 = document.translation_result_sha256
-    else:
-        result_sha256 = computed_sha256
+    # Always bind the review to the hash computed from the artifact on disk.
+    # The repository compares it against the stored column, so DB-vs-disk drift
+    # surfaces as a 409 instead of the stored value being compared to itself.
+    result_sha256 = bilingual_result_sha256(bilingual)
+    expected_hash = request.headers.get("if-match")
+    app_env = getattr(getattr(services, "settings", None), "app_env", "development")
+    if app_env.casefold() == "production" and not expected_hash:
+        raise ConflictError("If-Match is required when saving a production review.")
+    if expected_hash and expected_hash.strip('"') != result_sha256:
+        raise ConflictError("The translation result changed before the review could be saved.")
+    if not document.translation_result_sha256:
         await services.repository.update_document(
             document_id, translation_result_sha256=result_sha256
         )
         document.translation_result_sha256 = result_sha256
     validate_translation_approval(bilingual, review)
-    reviewed_payload = apply_translation_corrections(bilingual, review.corrections)
-    await services.storage.write_json(document_id, REVIEWED_BILINGUAL_PATH, reviewed_payload)
 
     now = datetime.now(UTC)
+    # Materialize the reviewed export BEFORE the review record commits, and
+    # only for approvals. A failed or rejected review must leave no
+    # reviewed-bilingual artifact behind. The write itself is atomic
+    # (temp file + rename), so readers never observe a partial file. Writing
+    # first means a failed write here leaves the document's review status
+    # untouched instead of stuck "approved" with a missing export - the
+    # repository call below is what actually commits the approval, and it
+    # re-validates the result hash itself, so a write that raced a stale
+    # artifact still fails safely at that point.
+    if review.decision == "approved":
+        reviewed_payload = apply_translation_corrections(bilingual, review.corrections)
+        await services.storage.write_json(
+            document_id, REVIEWED_BILINGUAL_PATH, reviewed_payload
+        )
     persisted = await services.repository.create_translation_review(
         TranslationReview(
             document_id=document_id,
@@ -596,6 +756,11 @@ async def assign_document_reviewer(
     document = await services.repository.get(document_id)
     principal = _principal(request)
     _enforce_document_access(principal, document, action="assign")
+    validate_reviewer_assignment(
+        services.settings,
+        reviewer_subject=reviewer_subject,
+        organization_id=document.organization_id,
+    )
     updated = await services.repository.assign_reviewer(
         document_id, reviewer_subject=reviewer_subject
     )
@@ -645,7 +810,8 @@ async def download_artifact(
 ) -> FileResponse:
     services = container(request)
     document = await services.repository.get(document_id)
-    _enforce_document_access(_principal(request), document)
+    principal = _principal(request)
+    _enforce_document_access(principal, document)
     if DocumentStatus(document.status) not in {
         DocumentStatus.COMPLETED,
         DocumentStatus.NEEDS_REVIEW,
@@ -688,18 +854,59 @@ async def download_artifact(
     elif artifact == "financial-validation":
         relative = "validation/financial.json"
         filename = f"{Path(document.original_filename).stem}-financial-validation.json"
+    elif artifact == "reviewed-financial":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_JSON_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.json"
+    elif artifact == "reviewed-financial-csv":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_CSV_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.csv"
+    elif artifact == "reviewed-financial-xlsx":
+        if document.financial_review_status != "approved":
+            raise ConflictError(
+                "Reviewed financial export is available only after financial approval."
+            )
+        relative = REVIEWED_FINANCIAL_XLSX_PATH
+        filename = f"{Path(document.original_filename).stem}-financial-approved.xlsx"
     else:
         raise DocumentNotFoundError("Download artifact was not found.")
-    if artifact in {"manifest", "reviewed-bilingual"}:
+    # These artifacts are materialized after processing completes (review-gated,
+    # written eagerly on approval), so they're never in manifest.json's
+    # artifacts list from the original processing job - they're served directly
+    # off disk instead of going through the declared-artifacts check below.
+    if artifact in {
+        "manifest",
+        "reviewed-bilingual",
+        "reviewed-financial",
+        "reviewed-financial-csv",
+        "reviewed-financial-xlsx",
+    }:
         target = services.storage.artifact_path(document_id, relative)
         if not target.exists():
             raise DocumentNotFoundError("Download artifact was not found.")
-        return FileResponse(
+        media_type = {
+            ".csv": "text/csv; charset=utf-8",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }.get(target.suffix.lower(), "application/json")
+        response = FileResponse(
             target,
-            media_type="application/json",
+            media_type=media_type,
             filename=filename,
             headers=NO_STORE,
         )
+        await _record_audit(
+            request,
+            action=f"document.download.{artifact}",
+            resource_id=document_id,
+        )
+        return response
     manifest = await services.storage.read_json(document_id, "manifest.json")
     declared_artifacts = {
         item for item in manifest.get("artifacts", []) if isinstance(item, str)
@@ -713,12 +920,18 @@ async def download_artifact(
         ".csv": "text/csv; charset=utf-8",
         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     }.get(target.suffix.lower(), "application/json")
-    return FileResponse(
+    response = FileResponse(
         target,
         media_type=media_type,
         filename=filename,
         headers=NO_STORE,
     )
+    await _record_audit(
+        request,
+        action=f"document.download.{artifact}",
+        resource_id=document_id,
+    )
+    return response
 
 
 @router.post("/{document_id}/cancel", response_model=CancelDocumentResponse, status_code=200)
@@ -726,7 +939,7 @@ async def cancel_document(request: Request, document_id: str) -> CancelDocumentR
     services = container(request)
     document = await services.repository.get(document_id)
     principal = _principal(request)
-    _enforce_document_access(principal, document)
+    _enforce_document_access(principal, document, action="cancel")
     document = await services.document_service.cancel(document_id)
     await AuditService(services.repository).record(
         organization_id=principal.organization_id,
@@ -757,7 +970,7 @@ async def retry_document(
         ) from exc
     document = await services.repository.get(document_id)
     principal = _principal(request)
-    _enforce_document_access(principal, document)
+    _enforce_document_access(principal, document, action="retry")
     await services.document_service.retry(document_id, mode=retry_mode)
     await services.runner.enqueue(document_id)
     await AuditService(services.repository).record(

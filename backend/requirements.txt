@@ -6,6 +6,7 @@ SQLAlchemy>=2.0
 aiosqlite>=0.20
 alembic>=1.14
 azure-ai-documentintelligence==1.0.2
+azure-ai-textanalytics>=5.3
 azure-identity>=1.19
 aiohttp>=3.11
 openai>=1.68
@@ -15,4 +16,5 @@ structlog>=25.1
 aiofiles>=24.1
 python-multipart>=0.0.20
 pypdf>=5.0
+PyJWT[crypto]>=2.10
 openpyxl>=3.1,<4

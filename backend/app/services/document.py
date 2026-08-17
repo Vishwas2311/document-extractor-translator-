@@ -11,9 +11,9 @@ from fastapi import UploadFile
 
 from app.core.config import Settings
 from app.core.enums import (
+    RETRIABLE_DOCUMENT_STATUSES,
     TERMINAL_DOCUMENT_STATUSES,
     DocumentStatus,
-    JobStatus,
     RetryMode,
 )
 from app.core.exceptions import ConflictError, InvalidDocumentError
@@ -41,6 +41,20 @@ class DocumentService:
         self.repository = repository
         self.storage = storage
         self.gateway = gateway or SecurityGateway(settings)
+        # Serializes concurrent reprocess/retranslate calls for the same
+        # document so their artifact cleanup (shutil.rmtree) never races
+        # against itself or against a winning request's already-running job.
+        # DocumentService is a process-wide singleton (see main.py's lifespan),
+        # so this dict safely accumulates one lock per document_id for the
+        # life of the process.
+        self._retry_locks: dict[str, asyncio.Lock] = {}
+
+    def _retry_lock(self, document_id: str) -> asyncio.Lock:
+        lock = self._retry_locks.get(document_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._retry_locks[document_id] = lock
+        return lock
 
     @staticmethod
     def _detect_type(header: bytes) -> tuple[str, str] | None:
@@ -171,47 +185,63 @@ class DocumentService:
             raise ConflictError(
                 "Approved documents cannot be overwritten by retry."
             )
-        job = await self.repository.create_retry_job(document_id, mode=mode)
-        if mode == RetryMode.REPROCESS:
-            try:
-                # Invalidate the completion marker before touching any derived file.
-                # Readers can then fail closed even if cleanup is interrupted midway.
-                await self.storage.delete_artifact(document_id, "manifest.json")
-                for prefix in (
-                    "pages",
-                    "exports",
-                    "raw",
-                    "normalized",
-                    "classification",
-                    "validation",
-                    "translations",
-                    "processing",
-                ):
-                    await self.storage.delete_prefix(document_id, prefix)
-            except Exception:
-                now = datetime.now(UTC)
-                await self.repository.finish_processing(
-                    document_id,
-                    job.id,
-                    document_values={
-                        "status": DocumentStatus.FAILED.value,
-                        "current_stage": DocumentStatus.FAILED.value,
-                        "error_code": "reprocess_cleanup_failed",
-                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
-                        "completed_at": now,
-                    },
-                    job_values={
-                        "status": JobStatus.FAILED.value,
-                        "stage": DocumentStatus.FAILED.value,
-                        "error_code": "reprocess_cleanup_failed",
-                        "safe_error_message": "Derived artifacts could not be invalidated safely.",
-                        "completed_at": now,
-                    },
-                )
-                raise
-        elif mode == RetryMode.RETRANSLATE:
-            await self.storage.delete_prefix(document_id, "translations")
-        return job
+        if mode not in (RetryMode.REPROCESS, RetryMode.RETRANSLATE):
+            return await self.repository.create_retry_job(document_id, mode=mode)
+
+        # Reprocess/retranslate delete artifacts before create_retry_job's
+        # atomic DB guard exists to protect them, so a second concurrent call
+        # for the same document must never run its cleanup at the same time -
+        # racing shutil.rmtree calls against each other, or (just as bad)
+        # running cleanup sequentially against a document a winning request
+        # has already started a fresh job against. The lock serializes that;
+        # re-fetching the document just below closes the remaining gap where
+        # a waiting request's status snapshot went stale while it waited.
+        async with self._retry_lock(document_id):
+            document = await self.repository.get(document_id)
+            if mode == RetryMode.REPROCESS:
+                # Best-effort pre-check so cleanup never destroys artifacts of a
+                # document that could not be retried anyway (or, now that this
+                # runs inside the lock, one a request that just won the race
+                # already advanced past retriable). The atomic status guard
+                # remains inside create_retry_job as the final authority.
+                if DocumentStatus(document.status) not in RETRIABLE_DOCUMENT_STATUSES:
+                    raise ConflictError(
+                        "Only failed, cancelled, or reviewable documents can be retried."
+                    )
+                # Artifact invalidation must complete BEFORE the retry job exists.
+                # Otherwise the recovery sweeper can claim the queued job mid-cleanup
+                # and resume from stale normalized/extracted artifacts.
+                try:
+                    # Invalidate the completion marker before touching any derived file.
+                    # Readers can then fail closed even if cleanup is interrupted midway.
+                    await self.storage.delete_artifact(document_id, "manifest.json")
+                    for prefix in (
+                        "pages",
+                        "exports",
+                        "raw",
+                        "normalized",
+                        "classification",
+                        "validation",
+                        "translations",
+                        "processing",
+                    ):
+                        await self.storage.delete_prefix(document_id, prefix)
+                except Exception:
+                    # No retry job was created yet, so there is no orphan queued job.
+                    # Guarded by status (not job ownership - no job exists yet to
+                    # own) so this can never overwrite a document a *different*,
+                    # already-winning request has since moved past retriable.
+                    now = datetime.now(UTC)
+                    await self.repository.mark_retriable_document_failed(
+                        document_id,
+                        error_code="reprocess_cleanup_failed",
+                        safe_error_message="Derived artifacts could not be invalidated safely.",
+                        completed_at=now,
+                    )
+                    raise
+            elif mode == RetryMode.RETRANSLATE:
+                await self.storage.delete_prefix(document_id, "translations")
+            return await self.repository.create_retry_job(document_id, mode=mode)
 
     async def cancel(self, document_id: str) -> Document:
         return await self.repository.cancel_document(document_id)
@@ -220,7 +250,6 @@ class DocumentService:
         document = await self.repository.get(document_id)
         if DocumentStatus(document.status) not in TERMINAL_DOCUMENT_STATUSES:
             raise ConflictError("A document cannot be deleted while it is processing.")
-        await self.repository.delete(document_id)
         try:
             await self.storage.delete_document(document_id)
         except OSError:
@@ -228,3 +257,7 @@ class DocumentService:
                 "document_storage_cleanup_failed",
                 document_id=document_id,
             )
+            # Preserve the database record so deletion can be retried and the
+            # remaining artifact is not orphaned without an owner or policy.
+            raise
+        await self.repository.delete(document_id)

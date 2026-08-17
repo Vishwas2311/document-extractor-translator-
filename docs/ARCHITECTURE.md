@@ -174,7 +174,7 @@ The container is closed during FastAPI shutdown.
 ### 4.4 Persistence
 
 SQLAlchemy uses async sessions against Azure Database for PostgreSQL. Alembic migrations
-(`backend/alembic/versions/`) are the schema-change mechanism; 8 revisions exist covering the
+(`backend/alembic/versions/`) are the schema-change mechanism; 9 revisions exist covering the
 initial schema, financial extraction, financial/translation reviews, authorization columns, and
 large-document progress tracking. Schema changes must go through a reviewed Alembic migration, not
 a runtime `create_all()` call, per [RULES.md §11](./RULES.md).
@@ -741,7 +741,9 @@ the code already enforces them.
    - **Extraction route:** Current Azure Document Intelligence
    - **Translation route:** Current Azure OpenAI
    - **Generative LLM exposure:** Yes; raw extracted non-English blocks may be submitted
-   - **Permitted use:** Synthetic or explicitly approved de-identified testing only
+   - **Permitted use:** Synthetic testing only (`ALLOW_SYNTHETIC_RAW_LLM=true`); de-identified
+     data must use `GENAI_PSEUDONYMIZED`. The implemented gateway enforces an explicit
+     data-class/profile allow-matrix that fails closed for uncovered combinations
    - **Status:** Current local-evaluation constraint
 
 2. **Profile:** `GENAI_PSEUDONYMIZED`
@@ -903,6 +905,13 @@ This is the **proposed production target**, not the current implementation. The 
    - **Exposed to generative LLM?:** No
 
 ### Target properties
+
+The application now enforces a production configuration boundary before constructing services.
+`APP_ENV=production` requires Entra JWT, PostgreSQL, Blob, Service Bus, managed identity, Defender,
+multilingual PII detection, immutable audit, private networking, HTTPS-only CORS, a strong
+pseudonymization secret, disabled runtime `create_all`, and an active rate limit. This is code-level
+configuration enforcement, not deployment evidence. If a selected managed adapter is unavailable,
+startup fails explicitly instead of silently falling back to local disk or in-process work.
 
 1. **Architecture area:** Compute
    - **Target component or rule:** Separate Azure Container Apps API and workers

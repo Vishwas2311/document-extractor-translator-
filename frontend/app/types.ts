@@ -417,25 +417,27 @@ export interface DocumentListResponse {
 
 export interface HealthStatus {
   status: string;
-  azure_configured: {
-    document_intelligence: boolean;
-    openai: boolean;
-  };
-  /** Present on the current backend; optional for older local evaluation builds. */
-  auth_required?: boolean;
-  default_processing_profile?: string;
-  default_data_class?: string;
-  openai_deployment_configured?: boolean;
+  /** /health/ready is unauthenticated - configuration detail (is Azure configured,
+   * auth mode, policy defaults) stays behind auth on /health/dependencies (see
+   * HealthDependencies). Operating limits below are non-sensitive and published
+   * in .env.example already, so they're safe on this unauthenticated endpoint. */
   database?: string;
   storage?: string;
   worker?: string;
   limits?: {
     max_upload_size_mb: number;
     max_document_pages: number;
-    di_page_range_size?: number;
-    di_range_concurrency?: number;
-    translation_concurrency?: number;
     job_poll_timeout_minutes?: number;
+  };
+}
+
+export interface HealthDependencies {
+  document_intelligence: {
+    configured: boolean;
+  };
+  azure_openai: {
+    configured: boolean;
+    deployment?: string | null;
   };
 }
 

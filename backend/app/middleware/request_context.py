@@ -1,3 +1,4 @@
+import re
 from uuid import uuid4
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -13,7 +14,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid4())
         # Reject client-supplied IDs that are too long or contain unsafe characters.
-        if len(request_id) > 64 or any(ord(ch) < 32 for ch in request_id):
+        if len(request_id) > 64 or not re.fullmatch(r"[A-Za-z0-9._:-]+", request_id):
             request_id = str(uuid4())
         request.state.request_id = request_id
         response = await call_next(request)
