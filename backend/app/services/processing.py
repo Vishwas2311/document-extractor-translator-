@@ -30,6 +30,7 @@ from app.schemas.translation import (
     TranslationBatchRequest,
     TranslationBatchResponse,
     TranslationInput,
+    TranslationItem,
 )
 from app.services.di_ranges import (
     assign_stable_ids,
@@ -556,6 +557,125 @@ class ProcessingService:
             batches.append(current)
         return batches
 
+    async def _translate_with_recovery(
+        self,
+        document_id: str,
+        artifact: str,
+        input_hash: str,
+        request: TranslationBatchRequest,
+        inputs: list[TranslationInput],
+        *,
+        root_artifact: str | None = None,
+        offset: int = 0,
+    ) -> tuple[TranslationBatchResponse, dict[str, str]]:
+        """Translate a (sub-)batch, retrying an ID mismatch up to
+        translation_id_mismatch_retries times. If every attempt in that budget
+        still mismatches: with retries disabled, raise immediately (unchanged,
+        whole-batch-fails contract). Otherwise, split the batch in half and
+        recover each half independently (recursively) - a block the model
+        keeps getting wrong then only takes that one block down for review,
+        not the dozens of others sharing its original batch.
+
+        Split artifact names are always `{root_artifact}.split-{start:04d}-{end:04d}.json`,
+        with start/end being this (sub-)batch's absolute position range within
+        the *original* top-level batch (`root_artifact`/`offset` are threaded
+        through the recursion unchanged/incrementing - a split name is never
+        built by appending onto the *current* artifact name, which is already
+        a split name past the first level and would otherwise nest deeper
+        with every additional failure). That keeps every artifact path exactly
+        one root + one range suffix regardless of recursion depth, and makes
+        the name deterministic (the same block range always maps to the same
+        path, so caching still works on reprocess) - not a name that grows
+        without bound the deeper a particular range keeps failing.
+
+        Returns a response covering every input in `inputs` (a block that
+        never recovered gets an empty placeholder translation, matched up by
+        the caller's existing empty-translation check) plus a
+        {block_id: reason} map for specifically those unrecoverable blocks.
+        """
+        root_artifact = root_artifact or artifact
+        attempts = self.translation_id_mismatch_retries + 1
+        last_exc: TranslationValidationError | None = None
+        for attempt in range(1, attempts + 1):
+            response = await self.translator.translate(request)
+            try:
+                self.validator.validate(inputs, response)
+            except TranslationValidationError as exc:
+                last_exc = exc
+                await logger.awarning(
+                    "translation_batch_id_mismatch",
+                    document_id=document_id,
+                    artifact=artifact,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                    batch_size=len(inputs),
+                    missing_ids=exc.details.get("missing_ids"),
+                    extra_ids=exc.details.get("extra_ids"),
+                    duplicate_ids=exc.details.get("duplicate_ids"),
+                )
+                await self.storage.write_json(
+                    document_id,
+                    f"{artifact.removesuffix('.json')}.mismatch-{attempt}.json",
+                    {
+                        "input_hash": input_hash,
+                        "prompt_version": TRANSLATION_PROMPT_VERSION,
+                        "response": response.model_dump(mode="json"),
+                        "missing_ids": exc.details.get("missing_ids"),
+                        "extra_ids": exc.details.get("extra_ids"),
+                        "duplicate_ids": exc.details.get("duplicate_ids"),
+                    },
+                )
+                continue
+            return response, {}
+
+        assert last_exc is not None
+        if self.translation_id_mismatch_retries == 0:
+            raise last_exc
+        if len(inputs) == 1:
+            reason = f"Translation failed: {last_exc.message}"
+            placeholder = TranslationBatchResponse(
+                translations=[TranslationItem(block_id=inputs[0].block_id, translated_text="")]
+            )
+            return placeholder, {inputs[0].block_id: reason}
+
+        midpoint = len(inputs) // 2
+        root = root_artifact.removesuffix(".json")
+        halves = [
+            (
+                inputs[:midpoint],
+                f"{root}.split-{offset:04d}-{offset + midpoint:04d}.json",
+                offset,
+            ),
+            (
+                inputs[midpoint:],
+                f"{root}.split-{offset + midpoint:04d}-{offset + len(inputs):04d}.json",
+                offset + midpoint,
+            ),
+        ]
+        merged_by_id: dict[str, TranslationItem] = {}
+        unrecoverable: dict[str, str] = {}
+        for half_inputs, half_artifact, half_offset in halves:
+            half_request = TranslationBatchRequest(
+                target_language=request.target_language, blocks=half_inputs
+            )
+            half_response, half_unrecoverable = await self._translate_with_recovery(
+                document_id,
+                half_artifact,
+                input_hash,
+                half_request,
+                half_inputs,
+                root_artifact=root_artifact,
+                offset=half_offset,
+            )
+            merged_by_id.update(
+                {item.block_id: item for item in half_response.translations}
+            )
+            unrecoverable.update(half_unrecoverable)
+        merged_response = TranslationBatchResponse(
+            translations=[merged_by_id[item.block_id] for item in inputs]
+        )
+        return merged_response, unrecoverable
+
     async def _resolve_batch_translation(
         self,
         document_id: str,
@@ -590,51 +710,17 @@ class ProcessingService:
             response = TranslationBatchResponse(
                 translations=[merged_by_id[item.block_id] for item in inputs]
             )
+            unrecoverable: dict[str, str] = {}
         else:
-            # A structured-output response with mismatched block_ids is
-            # structurally valid (not a transport failure the SDK's own retry
-            # covers) but unusable for id-based lookup - bounded retry here,
-            # not inside translator.translate(), since only this layer has
-            # both the response and the expected `inputs` set needed to
-            # detect and react to a mismatch.
-            attempts = self.translation_id_mismatch_retries + 1
-            for attempt in range(1, attempts + 1):
-                response = await self.translator.translate(request)
-                try:
-                    # Only checking for the raised (whole-batch) ID-mismatch case
-                    # here - the real per-block `invalid` dict is computed once,
-                    # below, after this loop settles on a response, same as the
-                    # cached-response branch above already does.
-                    self.validator.validate(inputs, response)
-                except TranslationValidationError as exc:
-                    await logger.awarning(
-                        "translation_batch_id_mismatch",
-                        document_id=document_id,
-                        artifact=artifact,
-                        attempt=attempt,
-                        max_attempts=attempts,
-                        missing_ids=exc.details.get("missing_ids"),
-                        extra_ids=exc.details.get("extra_ids"),
-                        duplicate_ids=exc.details.get("duplicate_ids"),
-                    )
-                    await self.storage.write_json(
-                        document_id,
-                        f"{artifact.removesuffix('.json')}.mismatch-{attempt}.json",
-                        {
-                            "input_hash": input_hash,
-                            "prompt_version": TRANSLATION_PROMPT_VERSION,
-                            "response": response.model_dump(mode="json"),
-                            "missing_ids": exc.details.get("missing_ids"),
-                            "extra_ids": exc.details.get("extra_ids"),
-                            "duplicate_ids": exc.details.get("duplicate_ids"),
-                        },
-                    )
-                    if attempt == attempts:
-                        raise
-                    continue
-                break
+            response, unrecoverable = await self._translate_with_recovery(
+                document_id, artifact, input_hash, request, inputs
+            )
 
         invalid = self.validator.validate(inputs, response)
+        # A block that never recovered (see _translate_with_recovery) has an empty
+        # placeholder translation, which the check above already flags with a
+        # generic "was empty" reason - replace it with the real one.
+        invalid.update(unrecoverable)
         await self.storage.write_json(
             document_id,
             artifact,
