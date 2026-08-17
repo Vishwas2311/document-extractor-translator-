@@ -652,21 +652,29 @@ class ProcessingService:
                 offset + midpoint,
             ),
         ]
+        # The two halves are independent (different blocks, different API
+        # calls) - resolve them concurrently, not one after the other, so a
+        # split costs roughly the same wall-clock time as the single attempt
+        # it replaced, not double.
+        half_results = await asyncio.gather(
+            *(
+                self._translate_with_recovery(
+                    document_id,
+                    half_artifact,
+                    input_hash,
+                    TranslationBatchRequest(
+                        target_language=request.target_language, blocks=half_inputs
+                    ),
+                    half_inputs,
+                    root_artifact=root_artifact,
+                    offset=half_offset,
+                )
+                for half_inputs, half_artifact, half_offset in halves
+            )
+        )
         merged_by_id: dict[str, TranslationItem] = {}
         unrecoverable: dict[str, str] = {}
-        for half_inputs, half_artifact, half_offset in halves:
-            half_request = TranslationBatchRequest(
-                target_language=request.target_language, blocks=half_inputs
-            )
-            half_response, half_unrecoverable = await self._translate_with_recovery(
-                document_id,
-                half_artifact,
-                input_hash,
-                half_request,
-                half_inputs,
-                root_artifact=root_artifact,
-                offset=half_offset,
-            )
+        for half_response, half_unrecoverable in half_results:
             merged_by_id.update(
                 {item.block_id: item for item in half_response.translations}
             )
