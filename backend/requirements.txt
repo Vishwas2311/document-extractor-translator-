@@ -15,6 +15,6 @@ tenacity>=9.0
 structlog>=25.1
 aiofiles>=24.1
 python-multipart>=0.0.20
-pypdf>=5.0
+pypdf>=6.16.0
 PyJWT[crypto]>=2.10
 openpyxl>=3.1,<4
