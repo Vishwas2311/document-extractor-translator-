@@ -591,12 +591,17 @@ async def test_batch_translation_missing_block_id_is_isolated_per_block() -> Non
     assert any("did not include this block" in warning for warning in second.warnings)
 
 
-async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -> None:
+async def test_default_validator_isolates_a_persistently_missing_block_via_split_recovery() -> None:
     """Documents current, real behavior with the actual (non-stubbed)
-    `TranslationValidator`: it already rejects an ID-set mismatch before the
-    block-mapping code in `run_batch` ever runs, so a missing block_id fails the whole
-    *batch* it was requested in (not the whole document - other batches are
-    unaffected), via the pre-existing `TranslationValidationError` handling."""
+    `TranslationValidator` and the default retry budget
+    (translation_id_mismatch_retries=1, the ProcessingService default): a
+    response missing one block_id is rejected before the block-mapping code
+    in `run_batch` ever runs, via the pre-existing `TranslationValidationError`
+    handling - but split-recovery (`_translate_with_recovery`) means only the
+    persistently-bad block ends up failed. b0001, which the stub translator
+    always translates correctly, recovers once the batch splits down to just
+    b0002 - it is no longer taken down alongside a block it has nothing to do
+    with."""
     storage = MemoryStorage()
     service = _service(
         storage=storage,
@@ -620,9 +625,9 @@ async def test_default_validator_rejects_missing_block_id_at_the_batch_level() -
 
     assert review_required
     first, second = document.blocks
-    assert first.translation_status == TranslationStatus.FAILED
+    assert first.translation_status == TranslationStatus.TRANSLATED
     assert second.translation_status == TranslationStatus.FAILED
-    assert any("Translation failed" in warning for warning in first.warnings)
+    assert any("Translation failed" in warning for warning in second.warnings)
 
 
 class FailsIdMismatchOnceTranslator:
@@ -772,6 +777,91 @@ async def test_id_mismatch_blast_radius_stays_batch_scoped_at_realistic_scale() 
     assert "translations/batch-0002.mismatch-1.json" in storage.payloads
     assert "translations/batch-0001.mismatch-1.json" not in storage.payloads
     assert "translations/batch-0003.mismatch-1.json" not in storage.payloads
+
+
+async def test_split_recovery_isolates_a_single_persistently_bad_block_within_a_batch() -> None:
+    """With retries enabled (the default), a single batch where one specific
+    block_id is always dropped must recover via recursive split - only that
+    one block ends up FAILED, not the other 7 sharing its batch. This is the
+    behavior improvement over the flat-retry-only approach: previously any
+    mismatch failed the whole batch (up to translation_max_blocks blocks) even
+    though only one block was ever actually the problem."""
+    storage = MemoryStorage()
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0004")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=25,
+        translation_id_mismatch_retries=1,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 9)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-9",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    review_required = await service._translate(
+        document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC
+    )
+
+    assert review_required
+    by_id = {block.block_id: block for block in document.blocks}
+    for block_id in ("b0001", "b0002", "b0003", "b0005", "b0006", "b0007", "b0008"):
+        assert by_id[block_id].translation_status == TranslationStatus.TRANSLATED, block_id
+    assert by_id["b0004"].translation_status == TranslationStatus.FAILED
+    assert any("Translation failed" in warning for warning in by_id["b0004"].warnings)
+
+
+async def test_split_recovery_artifact_names_stay_flat_and_bounded() -> None:
+    """Guards against the exact bug class a prior implementation of this same
+    recovery strategy hit: split artifact names built by appending onto the
+    *previous* split's name grow without bound the deeper a range keeps
+    failing, eventually breaking file writes on Windows. Every split artifact
+    name here must be exactly the original batch root plus one absolute
+    position-range suffix - never nested/cumulative - regardless of how many
+    times a given range keeps failing and re-splitting."""
+    storage = MemoryStorage()
+    translator = DropsOneBlockInASingleBatchTranslator(block_id_to_drop="b0004")
+    service = _service(
+        storage=storage,
+        translator=translator,
+        max_batch_blocks=25,
+        translation_id_mismatch_retries=1,
+    )
+    blocks = [
+        TextBlock(block_id=f"b{index:04d}", reading_order=index, source_text=f"청년지원 {index}")
+        for index in range(1, 9)
+    ]
+    document = CanonicalDocument(
+        document_id="doc-10",
+        filename="mixed.pdf",
+        status="translating",
+        pages=[PageMetadata(page_number=1, page_count=1, width=8.5, height=11, unit="inch")],
+        blocks=blocks,
+    )
+
+    await service._translate(document, profile=ProcessingProfile.GENAI_SYNTHETIC_POC)
+
+    split_artifact_names = [
+        name for name in storage.payloads if ".split-" in name
+    ]
+    assert split_artifact_names, "expected at least one split artifact to have been written"
+    for name in split_artifact_names:
+        # Exactly one root + one range suffix (+ an optional .mismatch-N
+        # diagnostic suffix) - never two ".split-" occurrences, which would
+        # mean a split name was built from another split name instead of the
+        # original batch root.
+        assert name.count(".split-") == 1, name
+        assert name.startswith("translations/batch-0001.split-"), name
+        # A generous, fixed upper bound - this must stay constant regardless
+        # of how many times a range keeps re-splitting, not grow with depth.
+        assert len(name) < 80, (name, len(name))
 
 
 class ProtectedTokenDriftTranslator:
