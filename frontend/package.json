@@ -21,7 +21,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.51.1",
+    "@cloudflare/vite-plugin": "1.52.1",
     "@tailwindcss/postcss": "4.3.3",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.2",
@@ -50,6 +50,7 @@
     "esbuild@0.28.1": true,
     "fsevents@2.3.3": true,
     "unrs-resolver@1.12.2": true,
-    "workerd@1.20260801.1": true
+    "workerd@1.20260801.1": true,
+    "workerd@1.20260811.1": true
   }
 }
