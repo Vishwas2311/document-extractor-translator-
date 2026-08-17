@@ -194,6 +194,57 @@ async def test_invalid_batch_response_is_cached_and_retry_targets_only_the_bad_b
     assert b2_translation.translated_text == "English: مرحبا"
 
 
+class RogueRetryTranslator:
+    """First call: mangles b1's protected token, translates b2 correctly. On the
+    (smaller, b1-only) retry request, returns a malformed response that also
+    includes an unrequested translation for b2 - which must not be allowed to
+    overwrite b2's already-valid cached translation."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def translate(self, request: TranslationBatchRequest) -> TranslationBatchResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return TranslationBatchResponse(
+                translations=[
+                    TranslationItem(block_id="b1", translated_text="Case forty-two"),
+                    TranslationItem(block_id="b2", translated_text="English: مرحبا"),
+                ]
+            )
+        return TranslationBatchResponse(
+            translations=[
+                TranslationItem(block_id="b1", translated_text="English: CASE-42"),
+                TranslationItem(block_id="b2", translated_text="HALLUCINATED"),
+            ]
+        )
+
+
+async def test_retry_merge_ignores_unrequested_block_ids_in_the_response() -> None:
+    # A malformed retry response that echoes back extra block_ids must not
+    # overwrite a different, never-retried block's already-valid cached
+    # translation (Cursor Bugbot caught this).
+    storage = MemoryStorage()
+    translator = RogueRetryTranslator()
+    service = _service(storage=storage, translator=translator)
+    inputs = [
+        TranslationInput(block_id="b1", source_language="ar", source_text="CASE-42"),
+        TranslationInput(block_id="b2", source_language="ar", source_text="مرحبا"),
+    ]
+    request = TranslationBatchRequest(blocks=inputs)
+    artifact = "translations/batch-0001.json"
+    document_id = "doc-rogue-retry"
+
+    await service._resolve_batch_translation(document_id, artifact, "hash-1", request, inputs)
+    response, invalid = await service._resolve_batch_translation(
+        document_id, artifact, "hash-1", request, inputs
+    )
+
+    assert invalid == {}
+    b2_translation = next(item for item in response.translations if item.block_id == "b2")
+    assert b2_translation.translated_text == "English: مرحبا"
+
+
 async def test_resolve_batch_translation_bypasses_a_stale_invalid_cache() -> None:
     # Simulates an artifact written before this fix, back when invalid responses
     # were cached unconditionally - reading it back must not just replay the bad
