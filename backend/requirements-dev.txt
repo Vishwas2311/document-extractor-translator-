@@ -4,4 +4,4 @@ pytest-asyncio>=0.25
 pytest-cov>=6.0
 ruff>=0.16.3
 mypy>=2.3.0
-types-openpyxl>=3.1
+types-openpyxl>=3.1.5.20260807
