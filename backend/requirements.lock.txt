@@ -1624,9 +1624,9 @@ sqlalchemy==2.0.51 \
     # via
     #   -r requirements.txt
     #   alembic
-starlette==1.5.0 \
-    --hash=sha256:7d5f63a7e4981a9587fc2a0fbc44cfb6cc4c9181d8c26d7e948871ed5da8c3df \
-    --hash=sha256:9ca76b47375e56f279d7c66651e801ef11167e58557c429be7ec55702d81d4bb
+starlette==1.6.0 \
+    --hash=sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c \
+    --hash=sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b
     # via fastapi
 structlog==26.1.0 \
     --hash=sha256:e081a26d6c373e6d201eca24eede26d8ffab07f88f477822e679183428d3d91e \
