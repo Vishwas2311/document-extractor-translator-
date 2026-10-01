@@ -16,5 +16,5 @@ structlog>=25.1
 aiofiles>=24.1
 python-multipart>=0.0.20
 pypdf>=6.16.0
-PyJWT[crypto]>=2.10
+PyJWT[crypto]>=2.15.0
 openpyxl>=3.1,<4
