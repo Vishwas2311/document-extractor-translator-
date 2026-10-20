@@ -8,7 +8,7 @@ alembic>=1.14
 azure-ai-documentintelligence==1.0.2
 azure-ai-textanalytics>=5.3
 azure-identity>=1.19
-aiohttp>=3.11
+aiohttp>=3.14.4
 openai>=1.68
 httpx>=0.28
 tenacity>=9.0
